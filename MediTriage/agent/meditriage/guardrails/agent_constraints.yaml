@@ -1,0 +1,56 @@
+# Agent 安全约束（仅列有 validator 运行时检查的硬约束）
+#
+# 语气、解释推理、区分事实/观点、隐私、不制造恐慌等"质性"要求规则验证器无法可靠
+# 判定，由系统提示与各 worker 的"接地铁律"负责，不在本层。本文件每个键都对应
+# validator.py 里的一处检查。
+#
+# allowed_tools 与各 worker 系统提示宣传的技能集保持一致（全部 9 个）——
+# 若此处只列子集而 prompt 宣传全集，模型照自家 prompt 正当调用也会触发告警噪音。
+
+agents:
+  consultation_agent:
+    allowed_tools: &all_skills
+      - search_knowledge
+      - recommend_lifestyle
+      - assess_risk
+      - analyze_symptoms
+      - disease_code
+      - clinical_guideline
+      - deep_research
+      - search_history
+      - search_similar_cases
+
+    # 五条医疗安全红线对所有产出用户可见文本的 Agent 统一生效
+    forbidden_actions:
+      - diagnose_disease        # 不下明确诊断（如"您患有高血压"）
+      - prescribe_medication    # 不开具体处方（药名 + 剂量）
+      - guarantee_cure          # 不保证治愈
+      - suggest_self_treatment  # 不建议自行用药/治疗、跳过就医
+      - recommend_treatment     # 不定夺侵入性治疗/手术方案（应引导就医评估）
+
+    output_constraints:
+      - must_include_disclaimer
+      - max_response_length: 2000
+
+  diagnostic_agent:
+    allowed_tools: *all_skills
+
+    forbidden_actions:
+      - diagnose_disease
+      - prescribe_medication
+      - guarantee_cure
+      - suggest_self_treatment
+      - recommend_treatment
+
+    output_constraints:
+      - must_recommend_doctor_visit_if_high_risk
+
+  research_agent:
+    allowed_tools: *all_skills
+
+    forbidden_actions:
+      - diagnose_disease
+      - prescribe_medication
+      - guarantee_cure
+      - suggest_self_treatment
+      - recommend_treatment

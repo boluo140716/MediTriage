@@ -1,0 +1,41 @@
+# LLM和模型
+openai>=2.0,<3.0          # 对齐实装 2.24.0（OpenAI 兼容客户端，指向本地 vLLM）
+sentence-transformers==5.3.0
+torch>=2.0,<3.0
+transformers>=4.41,<5.0
+
+# Agent框架
+pydantic>=2.10,<3.0      # 实装 2.12.x；放开补丁位、锁主版本
+pydantic-settings==2.7.0
+# 编排引擎（默认；SWARM_ENGINE=legacy 回退旧版 SwarmCoordinator）
+langgraph>=1.0,<2.0      # 实装 1.2.4；StateGraph 编排 swarm 拓扑 + ReAct 循环
+
+# 记忆管理（长期记忆：本地 Milvus + BGE-M3，见 meditriage/memory/medical_memory.py）
+redis==5.2.0             # 短期记忆可选后端
+
+# 向量数据库（Milvus）
+pymilvus>=2.3,<3.0
+# sentence-transformers 已在上方定义
+
+# 混合检索（hybrid: dense + 稀疏BM25 经 RRF 融合 → reranker）
+rank_bm25>=0.2.2,<1.0    # BM25Okapi 稀疏召回
+jieba>=0.42,<1.0         # 中文分词（BM25 语料/查询同一分词器）
+
+# 数据处理
+pandas>=2.0,<3.0
+numpy>=1.24,<3.0
+
+# 工具
+loguru==0.7.3
+python-dotenv==1.0.1
+pyyaml==6.0.3
+tqdm>=4.65,<5.0
+requests>=2.31,<3.0      # 实装 2.32.5；knowledge/query_rewrite.py 直连 vLLM HTTP
+
+# 异步支持
+aiohttp>=3.8,<4.0
+httpx>=0.24,<1.0
+
+# Web 前端（FastAPI + SSE）
+fastapi>=0.110,<1.0
+uvicorn>=0.27,<1.0

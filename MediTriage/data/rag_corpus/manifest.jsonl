@@ -1,0 +1,25 @@
+{"id": "ada_diabetes_2025", "source": "guideline", "topic": "ada_diabetes_2025", "year": "", "url": "", "lang": "en", "type": "clinical_guideline", "chars": 2444228}
+{"id": "aha_acc_chol_2018", "source": "AHA/ACC", "topic": "lipids", "year": 2018, "url": "https://www.ahajournals.org/doi/10.1161/CIR.0000000000000625", "lang": "en", "type": "clinical_guideline", "chars": 362607}
+{"id": "aha_acc_chol_highlights_2019", "source": "Ther Adv Cardiovasc Dis", "topic": "lipids", "year": 2019, "url": "https://journals.sagepub.com/doi/10.1177/1753944719881579", "lang": "en", "type": "clinical_guideline", "chars": 13474}
+{"id": "aha_acc_hcm_2024", "source": "AHA/ACC", "topic": "cardiomyopathy", "year": 2024, "url": "https://www.ahajournals.org/doi/10.1161/CIR.0000000000001250", "lang": "en", "type": "clinical_guideline", "chars": 438063}
+{"id": "aha_acc_vhd_2020", "source": "ACC/AHA", "topic": "vhd", "year": 2020, "url": "https://www.ahajournals.org/doi/10.1161/CIR.0000000000000923", "lang": "en", "type": "clinical_guideline", "chars": 902721}
+{"id": "aha_acs_2025", "source": "ACC/AHA", "topic": "acs", "year": 2025, "url": "https://www.ahajournals.org/doi/10.1161/CIR.0000000000001309", "lang": "en", "type": "clinical_guideline", "chars": 539455}
+{"id": "esc_acs_2023", "source": "ESC", "topic": "acs", "year": 2023, "url": "https://academic.oup.com/eurheartj/article/44/38/3720/7243210", "lang": "en", "type": "clinical_guideline", "chars": 710113}
+{"id": "esc_afib_2024_essential", "source": "ESC", "topic": "afib", "year": 2024, "url": "https://www.escardio.org/Guidelines/Clinical-Practice-Guidelines/Atrial-Fibrillation", "lang": "en", "type": "clinical_guideline", "chars": 714163}
+{"id": "esc_hf_2023_focused", "source": "ESC/HFA", "topic": "hf", "year": 2023, "url": "https://academic.oup.com/eurheartj/article/44/37/3627/7246292", "lang": "en", "type": "clinical_guideline", "chars": 85319}
+{"id": "esc_htn_2024", "source": "ESC", "topic": "hypertension", "year": 2024, "url": "https://academic.oup.com/eurheartj/article/45/38/3912/7741010", "lang": "en", "type": "clinical_guideline", "chars": 711747}
+{"id": "esc_pe_2019", "source": "ESC", "topic": "pe", "year": 2019, "url": "https://academic.oup.com/eurheartj/article/41/4/543/5556136", "lang": "en", "type": "clinical_guideline", "chars": 364931}
+{"id": "gina_asthma_2025_summary", "source": "GINA", "topic": "asthma", "year": 2025, "url": "https://ginasthma.org/wp-content/uploads/2025/11/GINA-Summary-Guide-2025-WEB_FINAL-WMS.pdf", "lang": "en", "type": "clinical_guideline", "chars": 113302}
+{"id": "gold_copd_2025", "source": "GOLD", "topic": "copd", "year": 2025, "url": "https://goldcopd.org/wp-content/uploads/2024/11/GOLD-2025-Report-v1.0-15Nov2024_WMV.pdf", "lang": "en", "type": "clinical_guideline", "chars": 852415}
+{"id": "kdigo_ckd_2024", "source": "KDIGO", "topic": "ckd", "year": 2024, "url": "https://kdigo.org/wp-content/uploads/2024/03/KDIGO-2024-CKD-Guideline.pdf", "lang": "en", "type": "clinical_guideline", "chars": 936183}
+{"id": "who_hypertension_treatment_2021", "source": "WHO", "topic": "hypertension", "year": 2021, "url": "https://iris.who.int/server/api/core/bitstreams/f062769d-f075-4a00-87af-0a2106e0bd04/content", "lang": "en", "type": "clinical_guideline", "chars": 157498}
+{"id": "01_lifestyle_hypertension", "source": "local_zh", "topic": "01_lifestyle_hypertension", "lang": "zh", "type": "lifestyle", "chars": 945}
+{"id": "02_lifestyle_diabetes", "source": "local_zh", "topic": "02_lifestyle_diabetes", "lang": "zh", "type": "lifestyle", "chars": 1083}
+{"id": "03_lifestyle_cold", "source": "local_zh", "topic": "03_lifestyle_cold", "lang": "zh", "type": "lifestyle", "chars": 1054}
+{"id": "04_lifestyle_general_health", "source": "local_zh", "topic": "04_lifestyle_general_health", "lang": "zh", "type": "lifestyle", "chars": 2285}
+{"id": "05_symptoms_emergency", "source": "local_zh", "topic": "05_symptoms_emergency", "lang": "zh", "type": "lifestyle", "chars": 3032}
+{"id": "10_icd10_cardiovascular", "source": "local_zh", "topic": "10_icd10_cardiovascular", "lang": "zh", "type": "disease_classification", "chars": 732}
+{"id": "11_icd10_endocrine", "source": "local_zh", "topic": "11_icd10_endocrine", "lang": "zh", "type": "disease_classification", "chars": 731}
+{"id": "12_icd10_infectious", "source": "local_zh", "topic": "12_icd10_infectious", "lang": "zh", "type": "disease_classification", "chars": 2157}
+{"id": "20_guideline_hypertension", "source": "local_zh", "topic": "20_guideline_hypertension", "lang": "zh", "type": "clinical_guideline", "chars": 6081}
+{"id": "21_guideline_diabetes", "source": "local_zh", "topic": "21_guideline_diabetes", "lang": "zh", "type": "clinical_guideline", "chars": 5039}

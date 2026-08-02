@@ -1,0 +1,28 @@
+name: regression
+
+# 免服务回归门禁：不依赖 vLLM / Milvus / GPU，只跑可在 CI 环境独立完成的检查。
+# 需要活服务的 e2e / swarm / rag / vision / benchmark 测试不在此运行。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  service-free-regression:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: MediTriage/agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: MediTriage/agent/requirements.txt
+      - name: Install package (with test extras)
+        run: pip install -e ".[test]"
+      - name: Syntax check (compileall)
+        run: python -m compileall -q meditriage
+      - name: Service-free regression tests
+        run: python -m pytest tests/test_regression_*.py -ra
