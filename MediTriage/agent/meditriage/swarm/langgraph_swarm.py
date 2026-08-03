@@ -278,6 +278,10 @@ class LangGraphSwarm:
                 result if isinstance(result, dict)
                 else {"answer": str(result)},
             )
+            entry["tool_failure_count"] = int(
+                (result if isinstance(result, dict) else {}).get(
+                    "tool_failure_count") or 0
+            )
             logger.info(f"{agent.agent_id}: Completed {st.type}")
         except asyncio.TimeoutError:
             logger.warning(
@@ -356,6 +360,10 @@ class LangGraphSwarm:
             "session_id": session_id,
             "agents_involved": completed_agents,
             "subtasks_completed": len(sc.get_all_completed_subtasks()),
+            "tool_failure_count": sum(
+                int(r.get("tool_failure_count") or 0)
+                for r in state.get("worker_results", [])
+            ),
             "total_time": (
                 end_time - state["start_time"]
             ).total_seconds(),

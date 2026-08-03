@@ -440,6 +440,8 @@ class AgentLoop:
         """
         if not hasattr(state, 'tool_call_count'):
             state.tool_call_count = 0
+        if not hasattr(state, 'tool_failure_count'):
+            state.tool_failure_count = 0
         if not hasattr(state, 'called_signatures'):
             state.called_signatures = set()
 
@@ -557,6 +559,7 @@ class AgentLoop:
             if (isinstance(tool_result, dict)
                     and tool_result.get("success") is False):
                 _any_failed = True
+                state.tool_failure_count += 1
 
             # 预览给前端看：优先用 skill 格式化好的 answer 文本，而非 dict repr
             if isinstance(tool_result, dict):
@@ -669,7 +672,8 @@ class AgentLoop:
         result = {
             'answer': final_answer,
             'iterations': state.iteration,
-            'agent_id': agent.agent_id
+            'agent_id': agent.agent_id,
+            'tool_failure_count': getattr(state, "tool_failure_count", 0),
         }
 
         # 让 Agent 进行结果后处理（如提取建议等）
@@ -680,6 +684,7 @@ class AgentLoop:
             "iterations": state.iteration,
             "answer_preview": (final_answer or "")[:500],
             "tool_call_count": getattr(state, "tool_call_count", 0),
+            "tool_failure_count": getattr(state, "tool_failure_count", 0),
         })
 
         state.mark_completed(result)

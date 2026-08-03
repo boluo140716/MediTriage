@@ -62,3 +62,7 @@ run_windows.ps1
 eval/runs/
 eval/
 docs/
+
+# SQLite WAL 日志（转诊记录等运行时数据）
+*.db-wal
+*.db-shm

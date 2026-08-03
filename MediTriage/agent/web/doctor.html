@@ -1,0 +1,179 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MediTriage 医生端 · 转诊队列</title>
+<style>
+  :root{--bg:#0f1117;--panel:#171a23;--panel2:#1d212c;--line:#2a2f3d;--text:#e5e7eb;
+        --dim:#9aa3b2;--accent:#4f8cff;--accent-soft:rgba(79,140,255,.15);
+        --red:#f87171;--orange:#fbbf24;--green:#34d399;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Microsoft YaHei","PingFang SC",sans-serif;min-height:100vh}
+  header{display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid var(--line);
+        background:var(--panel);position:sticky;top:0;z-index:5}
+  .logo{font-size:24px}
+  h1{font-size:17px;font-weight:600}
+  .sub{color:var(--dim);font-size:12px;margin-top:2px}
+  .spacer{flex:1}
+  .btn{background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent);
+       border-radius:6px;padding:6px 14px;cursor:pointer;font-size:13px}
+  .btn:hover{filter:brightness(1.15)}
+  .btn.ghost{background:transparent;color:var(--dim);border-color:var(--line)}
+  .tabs{display:flex;gap:8px;padding:14px 24px 0}
+  .tab{background:var(--panel);border:1px solid var(--line);color:var(--dim);border-radius:999px;
+       padding:5px 16px;cursor:pointer;font-size:13px}
+  .tab.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+  main{display:grid;grid-template-columns:1fr 420px;gap:16px;padding:16px 24px 40px;align-items:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--dim);font-weight:500;font-size:12px;background:var(--panel2)}
+  tr.click{cursor:pointer}
+  tr.click:hover{background:var(--panel2)}
+  .pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px}
+  .p-high{background:rgba(248,113,113,.15);color:var(--red)}
+  .p-medium{background:rgba(251,191,36,.15);color:var(--orange)}
+  .p-low{background:rgba(52,211,153,.15);color:var(--green)}
+  .s-escalated{background:rgba(79,140,255,.15);color:var(--accent)}
+  .s-doctor_replied{background:rgba(52,211,153,.15);color:var(--green)}
+  .s-ai_processing{background:rgba(251,191,36,.15);color:var(--orange)}
+  .empty{color:var(--dim);text-align:center;padding:60px 20px}
+  .detail{padding:18px}
+  .detail h2{font-size:15px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  .kv{display:grid;grid-template-columns:84px 1fr;gap:8px 12px;font-size:13px;margin:10px 0}
+  .kv .k{color:var(--dim)}
+  .kv .v{color:var(--text);word-break:break-word}
+  .sec{font-size:12px;color:var(--dim);margin:16px 0 6px;text-transform:uppercase;letter-spacing:.5px}
+  textarea{width:100%;min-height:110px;background:var(--panel2);border:1px solid var(--line);
+           color:var(--text);border-radius:8px;padding:10px;font-size:13px;resize:vertical;font-family:inherit}
+  textarea:disabled{opacity:.6}
+  .reply-box{background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.3);border-radius:8px;
+             padding:10px 12px;font-size:13px;color:var(--green)}
+  .reason{font-size:12px;color:var(--dim);margin-top:8px}
+  .statusbar{color:var(--dim);font-size:12px;padding:8px 24px 0}
+  a{color:var(--accent);text-decoration:none;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">🩺</span>
+  <div><h1>MediTriage 医生端 · 转诊队列</h1>
+       <div class="sub">AI 初诊低置信度/危机自动转人工 · 模拟演示版（无登录）</div></div>
+  <div class="spacer"></div>
+  <button class="btn ghost" onclick="location='/'" title="返回患者端">← 患者端</button>
+  <button class="btn" onclick="load()">🔄 刷新</button>
+</header>
+
+<div class="tabs">
+  <div class="tab on" data-f="escalated" onclick="setFilter('escalated')">待处理</div>
+  <div class="tab" data-f="all" onclick="setFilter('all')">全部</div>
+  <div class="tab" data-f="doctor_replied" onclick="setFilter('doctor_replied')">已回复</div>
+</div>
+<div class="statusbar" id="statusbar">加载中…</div>
+
+<main>
+  <div class="card">
+    <table>
+      <thead><tr><th>单号</th><th>风险</th><th>主诉</th><th>状态</th><th>时间</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">暂无转诊单</div>
+  </div>
+  <div class="card detail" id="detail">
+    <div class="empty">← 点击左侧转诊单查看交接摘要并回复</div>
+  </div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const RISK_MAP={high:['p-high','高危'],medium:['p-medium','中危'],low:['p-low','低危']};
+const STATUS_MAP={ai_processing:['s-ai_processing','AI处理中'],escalated:['s-escalated','待医生处理'],
+                  doctor_replied:['s-doctor_replied','医生已回复']};
+let filter='escalated';
+const FILTER_LABEL={escalated:'待处理',all:'全部',doctor_replied:'已回复'};
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function setFilter(f){
+  filter=f;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.f===f));
+  load();
+}
+async function load(){
+  $('statusbar').textContent='加载中…';
+  try{
+    const r=await fetch('/api/escalations'+(filter?'?status='+filter:''));
+    const data=await r.json();
+    const tb=$('rows');tb.innerHTML='';
+    $('empty').style.display=data.items.length?'none':'block';
+    data.items.forEach(it=>{
+      const rk=RISK_MAP[it.risk_level]||['p-medium','中危'];
+      const st=STATUS_MAP[it.status]||[ '', it.status];
+      const tr=document.createElement('tr');
+      tr.className='click';
+      tr.onclick=()=>openDetail(it.id);
+      tr.innerHTML=`<td><b>${esc(it.escalation_id)}</b></td>
+        <td><span class="pill ${rk[0]}">${rk[1]}</span></td>
+        <td>${esc((it.question||'').slice(0,40))}${(it.question||'').length>40?'…':''}</td>
+        <td><span class="pill ${st[0]}">${st[1]}</span></td>
+        <td style="color:var(--dim)">${esc((it.created_at||'').slice(5,16))}</td>`;
+      tb.appendChild(tr);
+    });
+    $('statusbar').textContent=`共 ${data.count} 条（${FILTER_LABEL[filter]||filter}）`;
+  }catch(e){$('statusbar').textContent='加载失败：'+e.message;}
+}
+async function openDetail(id){
+  const d=$('detail');
+  d.innerHTML='<div class="empty">加载中…</div>';
+  try{
+    const r=await fetch('/api/escalations/'+id);
+    const it=await r.json();
+    const rk=RISK_MAP[it.risk_level]||['p-medium','中危'];
+    const st=STATUS_MAP[it.status]||['',it.status];
+    const sm=it.summary||{};
+    const reasons=(it.reasons||[]).map(esc).join(' · ');
+    const conf=Math.round((it.confidence==null?0:it.confidence)*100);
+    let replyHtml='';
+    if(it.status==='doctor_replied'){
+      replyHtml=`<div class="sec">医生回复</div><div class="reply-box">${esc(it.doctor_reply)}</div>`;
+    }else{
+      replyHtml=`<div class="sec">回复（模拟医生）</div>
+        <textarea id="replyText" placeholder="输入回复内容，回车提交…"></textarea>
+        <div style="margin-top:10px"><button class="btn" onclick="submitReply(${it.id})">提交回复</button></div>`;
+    }
+    d.innerHTML=`<h2><span class="pill ${rk[0]}">${rk[1]}</span> ${esc(it.escalation_id)}
+        <span class="pill ${st[0]}" style="margin-left:auto">${st[1]}</span></h2>
+      <div class="kv">
+        <div class="k">患者主诉</div><div class="v">${esc(it.question)}</div>
+        <div class="k">AI 已给建议</div><div class="v">${esc((it.answer_preview||'（无）').slice(0,400))}</div>
+        <div class="k">风险等级</div><div class="v">${esc(it.risk_level)}</div>
+        <div class="k">置信度</div><div class="v">${conf}%（越低越应人工复核）</div>
+        <div class="k">时间</div><div class="v">${esc(it.created_at)}</div>
+      </div>
+      <div class="sec">交接摘要</div>
+      <div class="kv">
+        <div class="k">症状</div><div class="v">${esc(sm['症状']||'—')}</div>
+        <div class="k">已给建议</div><div class="v">${esc(sm['已给建议']||'—')}</div>
+        <div class="k">待确认点</div><div class="v">${esc(sm['待确认点']||'—')}</div>
+      </div>
+      <div class="reason">触发原因：${reasons||'—'}</div>
+      ${replyHtml}`;
+  }catch(e){d.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>';}
+}
+async function submitReply(id){
+  const txt=$('replyText').value.trim();
+  if(!txt){$('replyText').focus();return;}
+  try{
+    const r=await fetch('/api/escalations/'+id+'/reply',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({reply:txt}),
+    });
+    if(!r.ok){alert('提交失败：'+(await r.json()).detail||r.status);return;}
+    alert('已回复，状态流转为「医生已回复」');
+    load();openDetail(id);
+  }catch(e){alert('提交失败：'+e.message);}
+}
+load();
+</script>
+</body>
+</html>

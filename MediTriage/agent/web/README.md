@@ -72,6 +72,37 @@ data: {"type":"<event_type>","data":{...},"ts":"..."}
 `/health` 健康检查；`/api/meta` 直连 vLLM `/v1/models` 返回当前模型名与
 `max_model_len`，供前端展示真实上下文窗口。
 
+## 转诊闭环（P1-2）：AI 初诊 + 人工复核
+
+`/api/ask` 返回的 `result` 事件会附带 `escalation` 字段（未命中为 `null`）。
+命中即自动在 SQLite 建转诊单（`data/escalations.db`，状态机：
+`ai_processing -> escalated -> doctor_replied`），患者端显示转诊卡片，
+医生端在 `/doctor` 处理队列并回复。
+
+触发三层（`meditriage/workflows/escalation.py`）：
+1. 强制转诊：危机关键词（自伤/心脑血管急症等）、回答超时/报错/空回答、用户主动要求转人工；
+2. 信息咨询短路：怎么/如何/注意事项类科普提问直接不转（省一次 LLM 调用）；
+3. 模糊场景：LLM 置信度打分（0~1），低于阈值（默认 0.4）转诊；
+   LLM 失败/超时安全兜底转人工（宁过不欠）。
+
+环境变量（全部 `MEDITRIAGE_` 前缀）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MEDITRIAGE_ESCALATION_ENABLED` | 1 | 总开关 |
+| `MEDITRIAGE_ESCALATION_THRESHOLD` | 0.4 | 置信度阈值（越低越严） |
+| `MEDITRIAGE_ESCALATION_DB` | `data/escalations.db` | SQLite 路径 |
+| `MEDITRIAGE_ESCALATION_LLM` | 1 | 0 = 纯规则模式（不调 LLM，省成本/延迟） |
+
+### 转诊 API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/doctor` | 医生端页面（模拟身份，无登录；认证在 P2-5） |
+| GET | `/api/escalations?status=` | 转诊队列（status 可选 `escalated` / `doctor_replied`） |
+| GET | `/api/escalations/{id}` | 详情（含结构化交接摘要） |
+| POST | `/api/escalations/{id}/reply` | 医生回复：`{"reply": "..."}`，escalated -> doctor_replied |
+
 ## 事件流实现
 
 SSE 事件由 `event_emitter` 回调贯穿。编排引擎是 LangGraph StateGraph

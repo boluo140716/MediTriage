@@ -10,9 +10,9 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from loguru import logger
@@ -97,6 +97,42 @@ class AskRequest(BaseModel):
         return v
 
 
+class DoctorReply(BaseModel):
+    # 医生回复（模拟身份，无登录；认证在 P2-5）
+    reply: str = Field(..., min_length=1, max_length=4000)
+
+
+# 转诊闭环（P1-2）：低置信度/危机 -> 建单并附到 result 事件
+async def _attach_escalation(payload: dict, question: str,
+                             session_id: str, user_id: Optional[str],
+                             on_created: Optional[Callable[[dict], None]] = None) -> dict:
+    """评估是否转人工；命中则把转诊单信息附到 result payload。
+
+    转诊评估失败只记日志，绝不阻断主问答链路。
+    on_created：建单成功后的回调，用于立刻向患者端 SSE 推送转诊通知
+    （不等最终 result，患者可尽早感知"已转人工"）。
+    """
+    try:
+        from meditriage.workflows import get_escalation_service
+        esc = await get_escalation_service().evaluate(
+            question=question,
+            answer=payload.get("answer", ""),
+            session_id=session_id,
+            user_id=user_id,
+            result=payload,
+        )
+        if esc:
+            payload["escalation"] = esc
+            if on_created:
+                try:
+                    on_created(esc)
+                except Exception:
+                    logger.exception("转诊 SSE 通知推送失败")
+    except Exception as ex:
+        logger.exception(f"转诊评估失败: {ex}")
+    return payload
+
+
 def _sse_pack(event_type: str, data: dict) -> str:
     """打包成 SSE 行。"""
     payload = json.dumps(
@@ -169,7 +205,7 @@ async def ask(req: AskRequest, request: Request):
                     _va = _ensure_crisis_support(req.question or "", _va)
                     _va = _ensure_medication_safety(req.question or "", _va)
                     result["answer"] = _va
-                emitter("result", {
+                payload = {
                     "answer": result.get("answer", ""),
                     "suggestions": [],
                     "disclaimer": result.get("disclaimer", ""),
@@ -180,7 +216,12 @@ async def ask(req: AskRequest, request: Request):
                     "session_id": session_id,
                     "total_time": round(_time.time() - t0, 2),
                     "error": result.get("error", False),
-                })
+                }
+                payload = await _attach_escalation(
+                    payload, req.question, session_id, user_id,
+                    on_created=lambda esc: emitter("escalation_created", esc),
+                )
+                emitter("result", payload)
             else:
                 result = await process_with_swarm(
                     question=req.question,
@@ -189,7 +230,7 @@ async def ask(req: AskRequest, request: Request):
                     user_id=user_id,
                 )
                 # 最终完整结果（带 suggestions、disclaimer）
-                emitter("result", {
+                payload = {
                     "answer": result.get("answer", ""),
                     "suggestions": result.get("suggestions", []),
                     "disclaimer": result.get("disclaimer", ""),
@@ -198,7 +239,12 @@ async def ask(req: AskRequest, request: Request):
                     "session_id": session_id,
                     "total_time": result.get("total_time"),
                     "timeout_occurred": result.get("timeout_occurred", False),
-                })
+                }
+                payload = await _attach_escalation(
+                    payload, req.question, session_id, user_id,
+                    on_created=lambda esc: emitter("escalation_created", esc),
+                )
+                emitter("result", payload)
         except Exception as e:
             logger.exception("Swarm execution failed")
             emitter("error", {"message": str(e)})
@@ -234,6 +280,64 @@ async def ask(req: AskRequest, request: Request):
             "X-Accel-Buffering": "no",  # 关掉 nginx 缓冲
         },
     )
+
+
+# ---- 转诊闭环（P1-2）：医生端队列 ----
+@app.get("/doctor")
+async def doctor_page():
+    """医生端转诊队列页面（模拟版，无登录；认证在 P2-5）。"""
+    return FileResponse(
+        Path(__file__).parent / "doctor.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+@app.get("/api/escalations")
+async def list_escalations(status: Optional[str] = None):
+    """转诊单列表（医生队列）。
+
+    默认只返回「待处理」（escalated）；?status=all 看全部（含已回复）；
+    也可显式传 escalated / doctor_replied / ai_processing 过滤。
+    """
+    from meditriage.workflows import get_escalation_service
+    allowed = {"escalated", "doctor_replied", "ai_processing", "all"}
+    if status is None:
+        status = "escalated"
+    if status not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status 仅支持: {', '.join(sorted(allowed))}",
+        )
+    store_status = None if status == "all" else status
+    items = await asyncio.to_thread(
+        get_escalation_service().store.list, store_status
+    )
+    return {"items": items, "count": len(items), "status": status}
+
+
+@app.get("/api/escalations/{esc_id}")
+async def get_escalation(esc_id: str):
+    """转诊单详情（含结构化交接摘要）。"""
+    from meditriage.workflows import get_escalation_service
+    row = await asyncio.to_thread(get_escalation_service().store.get, esc_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="转诊单不存在")
+    return row
+
+
+@app.post("/api/escalations/{esc_id}/reply")
+async def reply_escalation(esc_id: str, body: DoctorReply):
+    """医生回复（模拟身份）：escalated -> doctor_replied。"""
+    from meditriage.workflows import get_escalation_service
+    try:
+        row = await asyncio.to_thread(
+            get_escalation_service().store.reply, esc_id, body.reply
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return row
 
 
 if __name__ == "__main__":

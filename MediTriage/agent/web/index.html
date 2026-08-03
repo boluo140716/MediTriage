@@ -183,6 +183,16 @@
   .ev .d code{background:var(--code-bg);border-radius:3px;padding:1px 4px;color:var(--code-fg);font-size:10px}
   .ev .d pre{background:var(--code-bg);border-radius:5px;padding:6px;margin:4px 0;font-size:10px;color:var(--muted);max-height:90px;overflow:auto;white-space:pre-wrap}
   .tl .empty{padding:24px 0;font-size:12px;color:var(--dim);text-align:center;display:block}
+  /* ============ 转诊闭环卡片（P1-2） ============ */
+  .esc-card{margin-top:10px;border:1px solid var(--border);border-left:3px solid var(--accent);
+            border-radius:8px;padding:10px 12px;background:var(--panel2)}
+  .esc-card.s-done{border-left-color:var(--green)}
+  .esc-h{font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px}
+  .esc-st{font-size:11px;border-radius:999px;padding:1px 9px;background:var(--accent-soft);color:var(--accent)}
+  .esc-card.s-done .esc-st{background:#10b98122;color:var(--green)}
+  .esc-b{font-size:12px;margin-top:6px;color:var(--text)}
+  .esc-r{font-size:12px;color:var(--dim);margin-top:4px}
+  .esc-hint{font-size:11px;color:var(--dim);margin-top:6px}
 </style>
 </head>
 <body>
@@ -201,6 +211,7 @@
   <div class="hdr-actions">
     <button class="iconbtn" id="tlToggle" title="显示/隐藏 Agent 时间线" onclick="toggleTL()">🐝</button>
     <button class="iconbtn" id="themeToggle" title="切换明暗主题" onclick="toggleTheme()">🌙</button>
+    <a class="iconbtn" href="/doctor" title="医生端转诊队列" style="text-decoration:none">🩺</a>
     <span id="status" class="status">空闲</span>
   </div>
 </header>
@@ -248,6 +259,7 @@ const EVENT_META={
   final_answer:{c:'done',l:'📝 最终答案'}, swarm_completed:{c:'done',l:'🏁 Swarm 完成'},
   session_completed:{c:'done',l:'🎬 会话结束'}, result:{c:'done',l:'📦 结果'},
   vision_started:{c:'vision',l:'🖼️ 影像分析'}, vision_answer:{c:'vision',l:'🔬 影像结论'},
+  escalation_created:{c:'escalation',l:'🩺 转诊建单'},
   error:{c:'error',l:'❌ 错误'}, ack:{c:'',l:'🔌 已连接'}
 };
 const SUGGEST=[
@@ -259,7 +271,7 @@ const SUGGEST=[
 const $=id=>document.getElementById(id);
 const messages=$('messages'), tl=$('tl'), statusEl=$('status'), sendBtn=$('send'), qBox=$('q'),
       fileInput=$('fileInput'), inbar=$('inbar');
-let sessionId=null, evCount=0, evidence=[], pendingImage=null, pendingName=null, thinkingEl=null, maxModelLen=0, ctxUsed=0, gotResult=false;
+let sessionId=null, evCount=0, evidence=[], pendingImage=null, pendingName=null, thinkingEl=null, escEarlyEl=null, maxModelLen=0, ctxUsed=0, gotResult=false;
 
 /* ---------- 主题 ---------- */
 function applyTheme(t){document.documentElement.setAttribute('data-theme',t);$('themeToggle').textContent=t==='dark'?'🌙':'☀️';try{localStorage.setItem('medix-theme',t)}catch(e){}}
@@ -320,6 +332,29 @@ function riskOf(text){
   return {cls:'low',label:'🟢 低风险'};
 }
 
+/* ---------- 转诊卡片 ---------- */
+function escCard(escInfo){
+  const stMap={ai_processing:['s-ai','AI处理中'],escalated:['s-es','已转人工 · 待医生处理'],
+               doctor_replied:['s-done','医生已回复']};
+  const st=stMap[escInfo.status]||['',''+escInfo.status];
+  const conf=Math.round((escInfo.confidence==null?0:escInfo.confidence)*100);
+  const reasons=(escInfo.reasons||[]).map(esc).join(' · ');
+  return `<div class="esc-card ${st[0]}">
+    <div class="esc-h">🩺 转诊闭环 <span class="esc-st">${st[1]}</span></div>
+    <div class="esc-b">单号 <b>${esc(escInfo.escalation_id)}</b> · 风险 <b>${esc(escInfo.risk_level)}</b> · 置信度 ${conf}%</div>
+    ${reasons?`<div class="esc-r">触发：${reasons}</div>`:''}
+    <div class="esc-hint">AI 初诊已转交人工复核，医生端（🩺）回复后此处状态会更新。</div>
+  </div>`;
+}
+function showEscEarly(info){
+  /* 建单事件先于最终 result 到达：在 thinking 下方先亮出转诊卡片，result 到达后合并 */
+  if(!escEarlyEl){
+    escEarlyEl=document.createElement('div');escEarlyEl.className='row';
+    messages.appendChild(escEarlyEl);scrollBottom();
+  }
+  escEarlyEl.innerHTML=`<div class="av bot">🩺</div><div class="bubble"><div class="card">${escCard(info)}</div></div>`;
+}
+
 /* ---------- 渲染消息 ---------- */
 function appendUser(q,img){
   clearEmpty();
@@ -337,6 +372,7 @@ function showThinking(){
 }
 function renderResult(data){
   clearEmpty();
+  if(escEarlyEl){escEarlyEl.remove();escEarlyEl=null;}
   if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
   const a=data.answer||'';
   const risk=riskOf(a);
@@ -362,6 +398,7 @@ function renderResult(data){
     + (risk?`<div class="risk ${risk.cls}">${risk.label}</div>`:'')
     + `<div class="ans">${fmt(a)}</div>`
     + evi
+    + (data.escalation?escCard(data.escalation):'')
     + `<div class="meta"><span class="pill">${mode}</span><span class="pill">⏱ ${(data.total_time!=null?Number(data.total_time).toFixed(1):'?')}s</span><span class="pill">session ${esc((data.session_id||'').slice(-6))}</span></div>`
     + `</div></div></div>`;
   messages.appendChild(row);
@@ -386,6 +423,7 @@ function addEvent(type,data,ts){
   else if(type==='vision_answer') body=`<pre>${esc((data.answer_preview||'').slice(0,300))}</pre>`;
   else if(type==='result') body=`<code>${data.mode==='vision'?'VLM':(data.swarm_enabled?'Swarm':'单Agent')}</code> · ${(data.total_time!=null?Number(data.total_time).toFixed(1):'?')}s`;
   else if(type==='error') body=`<pre style="color:#fca5a5">${esc(data.message||'')}</pre>`;
+  else if(type==='escalation_created') body=`单号 <code>${esc(data.escalation_id)}</code> · 风险 ${esc(data.risk_level)}`;
   else body=esc(data.question||data.mode||'');
   const el=document.createElement('div');el.className='ev '+meta.c;
   el.innerHTML=`<div class="t"><span>${esc(meta.l)}</span><span class="ts">#${evCount} ${time}</span></div><div class="d">${body}</div>`;
@@ -399,6 +437,7 @@ function handle(type,data,ts){
   if(type==='tool_call_completed'){const k=(data.agent_id||'')+'#'+(data.call_index!=null?data.call_index:'');let hit=false;
     for(let i=evidence.length-1;i>=0;i--){if(evidence[i].key===k&&!evidence[i].preview&&!evidence[i].cites){evidence[i].preview=data.result_preview||'';evidence[i].cites=data.citations||null;evidence[i].nf=!!data.not_found;hit=true;break;}}
     if(!hit){for(let i=evidence.length-1;i>=0;i--){if(evidence[i].tool===data.tool_name&&!evidence[i].preview&&!evidence[i].cites){evidence[i].preview=data.result_preview||'';evidence[i].cites=data.citations||null;evidence[i].nf=!!data.not_found;break;}}}}
+  if(type==='escalation_created'){showEscEarly(data);}
   if(type==='result'){gotResult=true;renderResult(data);}
   if(type==='error'){gotResult=true;if(thinkingEl){thinkingEl.remove();thinkingEl=null;}renderResult({answer:'处理失败：'+(data.message||'未知错误')+'\n请稍后重试；如症状紧急请直接就医或拨打 120。'});setStatus('错误','error');}
   if(type==='llm_response'&&data.prompt_tokens){ctxUsed=Math.max(ctxUsed,data.prompt_tokens);renderCtx();}
@@ -449,7 +488,7 @@ async function ask(){
   if(!q&&!pendingImage)return;
   const imgData=pendingImage,imgName=pendingName;
   sendBtn.disabled=true;appendUser(q,imgData);qBox.value='';qBox.style.height='auto';clearComposerImage();
-  clearTL();evidence=[];ctxUsed=0;gotResult=false;renderCtx();setStatus('处理中…','busy');showThinking();
+  clearTL();evidence=[];ctxUsed=0;gotResult=false;escEarlyEl=null;renderCtx();setStatus('处理中…','busy');showThinking();
   let done=false;
   try{
     const body={question:q||'请分析这张医学影像，指出主要发现与可能的异常。',session_id:sessionId};
