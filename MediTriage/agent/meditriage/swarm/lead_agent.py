@@ -355,6 +355,10 @@ class LeadAgent:
                     body = f"[风险等级: {risk}]\n{body}"
                 if not body:
                     body = "(该 Agent 未产出有效内容)"
+                # 提速：汇总只需各 Agent 的关键结论，全文截断为 600 字，
+                # 显著缩短汇总 LLM 生成时间（长调用 20-30s -> 10-15s）
+                if len(body) > 600:
+                    body = body[:600] + "…（后续内容截断）"
             else:
                 body = str(res)
             contributions_text.append(
@@ -418,9 +422,33 @@ class LeadAgent:
             response = await self.llm_client.chat([
                 {"role": "user", "content": synthesis_prompt}
             ])
-
-            return response
-
+            # 兜底：LLM 偶发返回空/过短时（如上游波动、上下文超长），
+            # 回退拼接各 Agent 已产出的正文，避免用户看到空白答案
+            if response and len(response.strip()) >= 20:
+                return response
+            logger.warning("Synthesis 返回为空/过短，回退拼接 Agent 贡献")
         except Exception as e:
             logger.error(f"Synthesis error: {e}")
-            return f"汇总结果时出错：{e}"
+
+        # ---- 兜底：拼接各 Agent 已产出的正文（过滤无效占位）----
+        fallback_bodies = []
+        for contrib in all_contributions:
+            res = contrib.result
+            if isinstance(res, dict):
+                body = str(res.get("answer") or "").strip()
+            else:
+                body = str(res).strip()
+            if body and body != "(该 Agent 未产出有效内容)":
+                if len(body) > 600:
+                    body = body[:600] + "…（后续内容截断）"
+                fallback_bodies.append(body)
+        if fallback_bodies:
+            return (
+                "\n\n".join(fallback_bodies)
+                + "\n\n【免责声明】\n以上信息基于多个专业 Agent 的分析整理，"
+                  "仅供参考，不能替代专业医生的诊断和治疗。"
+            )
+        return (
+            "抱歉，本次处理未能生成有效回答。请稍后重试或换一种问法；"
+            "如症状紧急，请直接就医或拨打 120。"
+        )

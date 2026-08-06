@@ -16,10 +16,15 @@ from ._prompt_blocks import identity_and_grounding
 def extract_risk_level(final_response: str) -> str:
     """从最终答案文本提取风险等级（emergency/high/medium/low/unknown）。
 
-    只解析"风险等级："紧跟的标签词，不扫全文，避免把升级警示语
-    （如"…可能升级为高危情况"）误判为风险等级。"中高"保守取 high。
+    只解析"风险等级：/被判定为/评估为/定为"等明确标签词紧跟的词，
+    不扫全文，避免把升级警示语（如"…可能升级为高危情况"）误判为
+    风险等级。"中高"保守取 high。
     """
-    m = re.search(r"风险等级[：:]\s*([^\n，,。；;（(]{1,6})", final_response or "")
+    m = re.search(
+        r"(?:风险等级|被判定为|评估为|判定为|定为)[：:为是]?\s*"
+        r"([^\n，,。；;（(]{1,6})",
+        final_response or "",
+    )
     if not m:
         return "unknown"
     label = m.group(1)

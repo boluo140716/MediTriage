@@ -143,6 +143,35 @@ def _sse_pack(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+# 最终回答分块流式推送（思考完成后打字机效果；前端收到 result 后替换为完整卡片）
+DEFAULT_ANSWER_CHUNK_INTERVAL = 0.03
+
+
+def _answer_chunk_size(text_len: int) -> int:
+    """分片大小：短回答 24 字符起步，长回答自动加大，保证 ≤ ~120 片 ≈ 3.6s 流完。"""
+    return max(24, (text_len + 119) // 120)
+
+
+async def _stream_answer(
+    emitter, text: str,
+    chunk_size: Optional[int] = None,
+    interval: float = DEFAULT_ANSWER_CHUNK_INTERVAL,
+) -> None:
+    """把最终回答按片推送给前端（SSE answer_chunk 事件）。
+
+    - 空/过短回答直接跳过（一次性 result 无感知差异）；
+    - 推流只是体验增强，任何失败都不能打断主链路（emitter 已自带 try/except）。
+    """
+    text = text or ""
+    size = chunk_size or _answer_chunk_size(len(text))
+    if len(text) <= size:
+        return
+    for i in range(0, len(text), size):
+        emitter("answer_chunk", {"chunk": text[i:i + size], "index": i // size})
+        await asyncio.sleep(interval)
+    emitter("answer_chunk", {"done": True})
+
+
 @app.post("/api/ask")
 async def ask(req: AskRequest, request: Request):
     """SSE 流式输出 Agent 协作的全过程。"""
@@ -221,8 +250,28 @@ async def ask(req: AskRequest, request: Request):
                     payload, req.question, session_id, user_id,
                     on_created=lambda esc: emitter("escalation_created", esc),
                 )
+                # 思考完成：最终回答分块流式输出（打字机效果），再发完整 result
+                await _stream_answer(emitter, payload.get("answer", ""))
                 emitter("result", payload)
             else:
+                # 轻量澄清门：信息不足直接返回追问（不跑完整 swarm，追问轮
+                # 从 30-90s 降到 3-8s）；危机/信息足够/达上限 -> 走完整流程
+                from meditriage.swarm.langgraph_swarm import _get_swarm
+                _clarify = await _get_swarm().clarify_if_needed(
+                    req.question, session_id, user_id,
+                )
+                if _clarify:
+                    payload = {
+                        "answer": "", "suggestions": [],
+                        "disclaimer": "", "swarm_enabled": False,
+                        "agents_involved": [], "session_id": session_id,
+                        "total_time": round(_time.time() - t0, 2),
+                        "timeout_occurred": False,
+                        "clarify": _clarify,
+                    }
+                    emitter("result", payload)
+                    await queue.put(("__END__", {}))
+                    return
                 result = await process_with_swarm(
                     question=req.question,
                     session_id=session_id,
@@ -239,11 +288,18 @@ async def ask(req: AskRequest, request: Request):
                     "session_id": session_id,
                     "total_time": result.get("total_time"),
                     "timeout_occurred": result.get("timeout_occurred", False),
+                    "risk_level": result.get("risk_level"),
                 }
-                payload = await _attach_escalation(
-                    payload, req.question, session_id, user_id,
-                    on_created=lambda esc: emitter("escalation_created", esc),
-                )
+                if result.get("clarify"):
+                    # 澄清追问轮：不推流初步分析、不触发转诊（追问不是最终分诊），
+                    # 前端直接展示澄清卡片
+                    payload["clarify"] = result["clarify"]
+                else:
+                    await _stream_answer(emitter, payload.get("answer", ""))
+                    payload = await _attach_escalation(
+                        payload, req.question, session_id, user_id,
+                        on_created=lambda esc: emitter("escalation_created", esc),
+                    )
                 emitter("result", payload)
         except Exception as e:
             logger.exception("Swarm execution failed")

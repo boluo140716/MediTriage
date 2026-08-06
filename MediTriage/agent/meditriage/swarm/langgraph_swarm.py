@@ -335,11 +335,16 @@ class LangGraphSwarm:
             self.short_term_memory.add_message(
                 session_id=session_id, role="user", content=question
             )
-            if final_answer:
-                self.short_term_memory.add_message(
-                    session_id=session_id, role="assistant",
-                    content=final_answer,
-                )
+        # 澄清判定 + 追问标记落记忆（统一 helper）
+        clarify = await self._attach_clarify(
+            question, session_id, final_answer, lead,
+        )
+        if self.short_term_memory and session_id and not clarify and final_answer:
+            # 追问轮不落不完整的初步分析，只落最终答案
+            self.short_term_memory.add_message(
+                session_id=session_id, role="assistant",
+                content=final_answer,
+            )
 
         sc.publish_event(Event(
             type=EventType.SWARM_COMPLETED,
@@ -389,7 +394,83 @@ class LangGraphSwarm:
                 "以上分析基于多个专业 Agent 的协作，仅供参考，"
                 "不能替代医生诊断。"
             )
+        if clarify:
+            result["clarify"] = clarify
+        # 聚合各 Agent 结构化风险等级（供转诊层做低危短路；取最高风险，
+        # unknown 视为无证据不参与短路）
+        _risk_rank = {"unknown": 0, "low": 1, "medium": 2, "high": 3, "emergency": 4}
+        _agg_risk = "unknown"
+        for _c in sc.get_contributions():
+            _rl = str((_c.result or {}).get("risk_level") or "unknown").lower()
+            if _risk_rank.get(_rl, 0) > _risk_rank.get(_agg_risk, 0):
+                _agg_risk = _rl
+        result["risk_level"] = _agg_risk
         return {"result": result}
+
+    async def _attach_clarify(self, question, session_id, final_answer, lead):
+        """澄清式多轮问诊：判定是否追问，命中时把追问写入短期记忆。
+
+        统一 _synthesize / _single 两路径的澄清集成：
+        - 判定 + [CLARIFY-ROUND] 标记落记忆在此收敛，避免两处重复；
+        - 用户消息与最终答案的落记忆由调用方各自负责（_synthesize 显式落，
+          _single 由 AgentLoop 已落），保证不重复、顺序正确。
+        返回 clarify dict 或 None（maybe_clarify 内部已兜底，绝不抛异常）。
+        """
+        if lead is None:
+            return None
+        # 用户主动要求转人工：跳过澄清追问，直接走回答+转诊（不因信息不足被拦截）
+        from meditriage.workflows.escalation import _ASK_DOCTOR_PAT
+        if _ASK_DOCTOR_PAT.search(question or ""):
+            logger.info("用户主动要求转人工：跳过澄清追问")
+            return None
+        from meditriage.swarm.clarification import (
+            clarify_memory_content, maybe_clarify,
+        )
+        clarify = await maybe_clarify(
+            question=question, session_id=session_id,
+            final_answer=final_answer,
+            llm_client=lead.llm_client,
+            memory=self.short_term_memory,
+        )
+        if clarify and self.short_term_memory and session_id:
+            self.short_term_memory.add_message(
+                session_id=session_id, role="assistant",
+                content=clarify_memory_content(clarify["questions"]),
+            )
+        return clarify
+
+    async def clarify_if_needed(self, question, session_id, user_id=None):
+        """轻量澄清门：信息不足直接返回追问（不跑完整 swarm）。
+
+        追问轮从 30-90s（完整 agent 推理 + RAG + 汇总）降到 3-8s
+        （仅规则判定 + 1 次问题生成）。返回 None 表示应走完整流程：
+        - 危机词命中 -> 走完整流程（出诊断 + 转诊层拦截）；
+        - 信息足够 / 达追问上限 -> 走完整流程出最终诊断。
+        仅轻量轮落 user 消息与 [CLARIFY-ROUND] 标记（完整流程路径由
+        _synthesize 落，避免重复）。
+        """
+        # 累计历史 + 规则危机检测（轻量轮不跑 agent，危机只靠用户自述规则词）
+        msgs = (
+            self.short_term_memory.get_recent_messages(session_id, limit=200)
+            if self.short_term_memory else []
+        )
+        hist = " ".join(
+            str(m.get("content") or "") for m in (msgs or [])
+            if m.get("role") == "user"
+        )
+        combined = f"{hist} {question}".strip()
+        from meditriage.workflows.escalation import _CRISIS_PAT
+        if _CRISIS_PAT.search(combined):
+            logger.info("轻量澄清门：危机词命中，走完整流程（转诊拦截）")
+            return None
+        lead = LeadAgent()
+        clarify = await self._attach_clarify(question, session_id, "", lead)
+        if clarify and self.short_term_memory and session_id:
+            # 轻量轮落 user 消息（完整流程路径由 _synthesize 落）
+            self.short_term_memory.add_message(
+                session_id=session_id, role="user", content=question
+            )
+        return clarify
 
     async def _single(self, state: _SwarmState) -> Dict[str, Any]:
         """单任务直接调用对应 Agent（对齐协调器单 Agent 路由）。"""
@@ -424,6 +505,22 @@ class LangGraphSwarm:
             result["route_reason"] = f"单任务路由到 {agent_id}"
         result.setdefault("disclaimer", _DEFAULT_DISCLAIMER)
         result.setdefault("suggestions", [])
+        # 单 Agent 路径补齐结构化风险等级（consultation_agent 无 post_process；
+        # 复用 diagnostic_agent 的标签解析，供转诊层做高危转诊/低危短路）
+        try:
+            from meditriage.agents.diagnostic_agent import extract_risk_level
+            result.setdefault(
+                "risk_level", extract_risk_level(result.get("answer", ""))
+            )
+        except Exception:
+            pass
+        # 澄清式多轮问诊（单 Agent 路由同样接入，保证模糊描述也会追问）
+        clarify = await self._attach_clarify(
+            state["question"], state["session_id"],
+            result.get("answer", ""), state.get("lead"),
+        )
+        if clarify:
+            result["clarify"] = clarify
         return {"result": result}
 
     async def _persist(self, state: _SwarmState) -> Dict[str, Any]:
@@ -435,15 +532,17 @@ class LangGraphSwarm:
             "total_time",
             (datetime.now() - state["start_time"]).total_seconds(),
         )
-        # 失败/空答案不写（_persist_long_term 内判定），避免污染 agent_memory
-        await asyncio.to_thread(
-            _persist_long_term,
-            state["question"], result.get("answer", ""),
-            state["session_id"],
-            "swarm" if mode == "swarm" else f"mode={mode}",
-            None if mode == "swarm" else result,
-            state["user_id"],
-        )
+        # 追问轮不写长期记忆（初步分析是半成品，避免污染 agent_memory）；
+        # 其余失败/空答案由 _persist_long_term 内判定
+        if not result.get("clarify"):
+            await asyncio.to_thread(
+                _persist_long_term,
+                state["question"], result.get("answer", ""),
+                state["session_id"],
+                "swarm" if mode == "swarm" else f"mode={mode}",
+                None if mode == "swarm" else result,
+                state["user_id"],
+            )
         state["emit"]("session_completed", {
             "session_id": state["session_id"],
             "mode": mode,

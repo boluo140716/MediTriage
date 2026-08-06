@@ -55,8 +55,9 @@ class QueryRewriter:
         self,
         max_variants: int = 4,
         max_terms: int = 8,
-        timeout: float = 8.0,
+        timeout: float = 4.0,
         cache_size: int = 512,
+        circuit_breaker_threshold: int = 2,
     ):
         cfg = _load_llm_config()
         self.base_url = str(cfg.get("base_url", "")).rstrip("/")
@@ -67,6 +68,10 @@ class QueryRewriter:
         self.timeout = timeout
         self._cache: "OrderedDict[str, List[str]]" = OrderedDict()
         self._cache_size = cache_size
+        # 熔断：LLM 改写连续失败达到阈值 -> 本次运行期跳过改写（消灭
+        # "每次失败每次白等"；成功一次即重置）
+        self.circuit_breaker_threshold = circuit_breaker_threshold
+        self._consecutive_failures = 0
         logger.info(
             f"QueryRewriter: model={self.model} @ {self.base_url} "
             f"(timeout={timeout}s)"
@@ -84,6 +89,18 @@ class QueryRewriter:
         ascii_letters = sum(c.isascii() and c.isalpha() for c in q)
         return ascii_letters >= 12 and ascii_letters / max(len(q), 1) >= 0.5
 
+    @staticmethod
+    def _is_simple_query(q: str) -> bool:
+        """简短查询（<=12 字符且空格少）：改写增益有限且 LLM 调用常超时，
+        直接原 query 检索（实测短查询 rewrite 失败率高、白耗 2-8s）。
+
+        与 _is_clean_english 互补：此处覆盖中文/混合短句（"腰疼怎么办"、
+        "眼睛干涩"）；规范英文短句已由 _is_clean_english 处理。"""
+        if not q:
+            return True
+        q2 = q.strip()
+        return len(q2) <= 12 and q2.count(" ") <= 3
+
     # ---- 公开接口 ----
     def rewrite(self, query: str) -> List[str]:
         """返回去重的查询变体列表，第一个恒为原 query。失败退回 [原 query]。"""
@@ -93,8 +110,18 @@ class QueryRewriter:
         if q in self._cache:
             self._cache.move_to_end(q)
             return self._cache[q]
-        # pre-gate：规范英文短句跳过 LLM 改写（确定性、零 8B 调用、避免中文变体污染）
-        if self._is_clean_english(q):
+        # pre-gate：规范英文短句 / 简短查询跳过 LLM 改写（确定性、零 8B 调用，
+        # 避免中文变体污染；短查询改写增益有限且常超时）
+        if self._is_clean_english(q) or self._is_simple_query(q):
+            self._cache_put(q, [q])
+            return [q]
+
+        # 熔断：连续失败达到阈值 -> 本次运行期跳过 LLM 改写（直接原 query）
+        if self._consecutive_failures >= self.circuit_breaker_threshold:
+            logger.debug(
+                f"rewrite 熔断中（连续失败 {self._consecutive_failures} 次），"
+                f"直接返回原 query"
+            )
             self._cache_put(q, [q])
             return [q]
 
@@ -109,10 +136,12 @@ class QueryRewriter:
             if terms:
                 # 关键词富集串（利于 BM25/跨语言）
                 variants.append(" ".join(terms[: self.max_terms]))
+            self._consecutive_failures = 0  # 成功一次即重置熔断计数
         except Exception as e:
             logger.warning(
                 f"query rewrite failed ({type(e).__name__}: {e}); 用原 query"
             )
+            self._consecutive_failures += 1  # 失败累计（触发熔断）
 
         variants = self._dedup(variants)[: self.max_variants]
         self._cache_put(q, variants)

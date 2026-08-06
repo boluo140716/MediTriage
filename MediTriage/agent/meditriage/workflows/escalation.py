@@ -54,10 +54,12 @@ _ASK_DOCTOR_PAT = re.compile(
     r"要医生|挂号|预约医生|人工介入"
 )
 
-# 回答侧"已提示立即就医"信号：不作为强制转诊，但计入原因并抬高风险
+# 回答侧"已提示立即就医"信号：不作为强制转诊，但计入原因并抬高风险。
+# 不含"急救/紧急情况"等宽泛词（AI 几乎每个回答都带"如遇紧急情况请立即
+# 拨打急救电话"这类泛化话术，误判会把非问诊/科普咨询也转人工）。
 _SEEK_CARE_PAT = re.compile(
-    r"立即就医|尽快就医|马上就医|立即去医院|尽快去医院|紧急情况|"
-    r"马上到急诊|拨打\s*120|急救"
+    r"立即就医|尽快就医|马上就医|立即去医院|尽快去医院|"
+    r"马上到急诊|拨打\s*120"
 )
 
 # 信息咨询判定：无风险信号且是"怎么/如何/注意事项"类科普咨询 -> 明显低风险，
@@ -65,7 +67,8 @@ _SEEK_CARE_PAT = re.compile(
 # 不命中，进第 3 层 LLM 打分。
 _INFO_QUERY_PAT = re.compile(
     r"怎么|如何|怎样|需要注意|注意什么|有什么注意事项|建议|是什么|什么叫|"
-    r"有什么区别|区别|方法|好吗|能不能|可不可以|可以吗|该不该|要不要|合适吗"
+    r"有什么区别|区别|方法|好吗|能不能|可不可以|可以吗|该不该|要不要|合适吗|"
+    r"你是谁|我是谁|自我介绍|介绍一下|能做什么|会做什么|有哪些功能|什么功能"
 )
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -172,8 +175,13 @@ def _rule_signals(question: str, answer: str,
         reasons.append("回答已提示立即就医")
         risk_level, confidence = "high", 0.3
 
-    # 5) 信息咨询判定：仅当没有任何风险信号时有效
-    info_query = (not reasons) and bool(_INFO_QUERY_PAT.search(q))
+    # 5) 信息咨询判定：科普咨询（怎么/如何/注意事项）且问题无危机词 -> 不转。
+    # 不看答案的就医提示（科普答案常含"如有疑虑请及时就医"等泛化话术，
+    # 若计入会导致科普咨询全部被误转人工）
+    info_query = (
+        bool(_INFO_QUERY_PAT.search(q))
+        and not _CRISIS_PAT.search(q)
+    )
     return RuleSignals(
         force=False, risk_level=risk_level,
         confidence=confidence, reasons=reasons,
@@ -295,33 +303,42 @@ class EscalationService:
                     summary=_rule_summary(question, answer, "high"),
                 )
             return None
+        # 规则层高危信号（回答已提示立即就医等）-> 直接转（不依赖评分）
+        if sig.risk_level == "high" and sig.reasons:
+            return EscalationDecision(
+                should_escalate=True, confidence=sig.confidence,
+                risk_level="high",
+                reasons=sig.reasons + ["规则高危信号直接转人工"],
+                summary=_rule_summary(question, answer, "high"),
+            )
         scored = await self._llm_score(question, answer)
         if scored is None:
-            # LLM 不可用：宁过不欠，转人工由医生复核
+            # 评分不可用：无规则高危信号 -> 不转（信任规则层 + Agent 评估，
+            # 避免"评分故障导致几乎所有问题都转人工"）
+            logger.debug("置信度评分不可用且无规则高危信号，不转人工")
+            return None
+        # 只有"判断为高危"才转：评分 risk_level=high 且低置信度；
+        # low/medium 一律不转（中危由 AI 答复 + 建议就医，不强制转人工）
+        if scored["risk_level"] == "high" and scored["confidence"] < self.threshold:
+            base = _rule_summary(question, answer, "high")
+            summary = {
+                **base,
+                **{k: v for k, v in (scored.get("summary") or {}).items() if v},
+            }
             return EscalationDecision(
-                should_escalate=True, confidence=0.0,
-                risk_level="high" if sig.risk_level == "high" else "medium",
-                reasons=sig.reasons + ["置信度评分不可用，安全兜底转人工"],
-                summary=_rule_summary(question, answer, "medium"),
+                should_escalate=True,
+                confidence=scored["confidence"],
+                risk_level="high",
+                reasons=sig.reasons + [
+                    f"置信度 {scored['confidence']:.2f} < 阈值 {self.threshold}"
+                ],
+                summary=summary,
             )
-        # 交接摘要固定四键：LLM 返回优先，缺失键用规则摘要兜底
-        base = _rule_summary(question, answer, scored["risk_level"])
-        summary = {
-            **base,
-            **{k: v for k, v in (scored.get("summary") or {}).items() if v},
-        }
-        low_conf = scored["confidence"] < self.threshold
-        reasons = sig.reasons + (
-            [f"置信度 {scored['confidence']:.2f} < 阈值 {self.threshold}"]
-            if low_conf else []
+        logger.debug(
+            f"评分 {scored['risk_level']}/{scored['confidence']:.2f}，"
+            f"非高危不转人工"
         )
-        return EscalationDecision(
-            should_escalate=low_conf,
-            confidence=scored["confidence"],
-            risk_level=scored["risk_level"],
-            reasons=reasons,
-            summary=summary,
-        )
+        return None
 
     async def evaluate(
         self,
@@ -350,8 +367,38 @@ class EscalationService:
             elif sig.info_query:
                 # 明显低风险的信息咨询：短路，不调 LLM
                 return None
+            elif str((result or {}).get("risk_level") or "").lower() in (
+                "high", "emergency"
+            ):
+                # Agent 结构化评估为高危/紧急：直接转人工（不等 LLM 评分）
+                logger.debug(f"高危信号：Agent 评估 {result.get('risk_level')}，转人工")
+                decision = EscalationDecision(
+                    should_escalate=True, confidence=0.6,
+                    risk_level=str(result.get("risk_level") or "high").lower(),
+                    reasons=["Agent 结构化评估为高危/紧急"],
+                    summary=_rule_summary(question, answer, "high"),
+                )
+            elif str((result or {}).get("risk_level") or "").lower() == "low":
+                # Agent 明确评估低危 -> 不转人工。答案里的"立即就医/尽快就医"
+                # 多为 AI 泛化建议话术（几乎所有回答都有），不据此转人工；
+                # 仅当 Agent 无风险结论时才看规则/评分信号。
+                logger.debug("Agent 评估低危：不转人工")
+                return None
+            elif str((result or {}).get("risk_level") or "").lower() == "medium":
+                # 中危：由 AI 答复 + 就医建议承接，不强制转人工
+                # （用户要求：只有高危/异常/主动才转）
+                logger.debug("中危不转人工：由 AI 答复 + 就医建议承接")
+                return None
+            elif (
+                sig.risk_level == "low"
+                and str((result or {}).get("risk_level") or "").lower()
+                == "unknown"
+            ):
+                # Agent 无结构化风险结论且规则无信号 -> 不转（普通问题）
+                logger.debug("无风险信号且 Agent 无高危证据：不转人工")
+                return None
             else:
-                # 模糊场景：LLM 置信度打分（或纯规则模式不转）
+                # Agent 无风险等级但有规则风险信号 / 完全未知：LLM 评分补判
                 decision = await self._ambiguous_decision(question, answer, sig)
 
             if decision is None or not decision.should_escalate:

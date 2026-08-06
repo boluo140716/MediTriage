@@ -193,6 +193,16 @@
   .esc-b{font-size:12px;margin-top:6px;color:var(--text)}
   .esc-r{font-size:12px;color:var(--dim);margin-top:4px}
   .esc-hint{font-size:11px;color:var(--dim);margin-top:6px}
+  .stream-txt{white-space:pre-wrap;word-break:break-word}
+  .stream-cur{display:inline-block;width:2px;height:1.05em;background:var(--accent);vertical-align:-2px;margin-left:1px;animation:blink 1s steps(2,start) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .clarify-card{border-left:3px solid var(--orange)}
+  .clarify-title{font-size:14px;font-weight:600;margin-bottom:8px;color:var(--orange)}
+  .clarify-list{display:flex;flex-direction:column;gap:6px}
+  .clarify-q{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+             padding:8px 12px;font-size:13px;cursor:pointer;color:var(--text)}
+  .clarify-q:hover{border-color:var(--orange);color:var(--orange)}
+  .clarify-q::before{content:'💬 ';color:var(--dim)}
 </style>
 </head>
 <body>
@@ -212,6 +222,7 @@
     <button class="iconbtn" id="tlToggle" title="显示/隐藏 Agent 时间线" onclick="toggleTL()">🐝</button>
     <button class="iconbtn" id="themeToggle" title="切换明暗主题" onclick="toggleTheme()">🌙</button>
     <a class="iconbtn" href="/doctor" title="医生端转诊队列" style="text-decoration:none">🩺</a>
+    <button class="iconbtn" id="newChat" title="清空会话并开始新对话" onclick="newChat()">🗑️</button>
     <span id="status" class="status">空闲</span>
   </div>
 </header>
@@ -262,6 +273,7 @@ const EVENT_META={
   escalation_created:{c:'escalation',l:'🩺 转诊建单'},
   error:{c:'error',l:'❌ 错误'}, ack:{c:'',l:'🔌 已连接'}
 };
+const LS_KEY='meditriage_chat_v1';
 const SUGGEST=[
   {k:'问诊',t:'我最近头痛、视力模糊、血压偏高，应该怎么办？'},
   {k:'用药',t:'2型糖尿病患者日常饮食和用药需要注意什么？'},
@@ -271,7 +283,7 @@ const SUGGEST=[
 const $=id=>document.getElementById(id);
 const messages=$('messages'), tl=$('tl'), statusEl=$('status'), sendBtn=$('send'), qBox=$('q'),
       fileInput=$('fileInput'), inbar=$('inbar');
-let sessionId=null, evCount=0, evidence=[], pendingImage=null, pendingName=null, thinkingEl=null, escEarlyEl=null, maxModelLen=0, ctxUsed=0, gotResult=false;
+let sessionId=null, evCount=0, evidence=[], pendingImage=null, pendingName=null, thinkingEl=null, escEarlyEl=null, streamEl=null, streamBuf='', transcript=[], restoring=false, maxModelLen=0, ctxUsed=0, gotResult=false;
 
 /* ---------- 主题 ---------- */
 function applyTheme(t){document.documentElement.setAttribute('data-theme',t);$('themeToggle').textContent=t==='dark'?'🌙':'☀️';try{localStorage.setItem('medix-theme',t)}catch(e){}}
@@ -303,10 +315,15 @@ function fmt(text){
   const cells=s=>s.replace(/^\||\|$/g,'').split('|').map(x=>x.trim());
   for(let i=0;i<lines.length;i++){
     let s=lines[i].trim();
-    if(!s){closeL();closeT();continue;}
+    if(!s){
+      // 空行后仍是数字列表项：保持当前 ol 不关闭（LLM 常以空行分隔列表项，
+      // 若每个 1. 独立成 <ol> 会全部显示"1."；合并后浏览器自动连续编号）
+      if(list==='ol'&&i+1<lines.length&&/^\d+[\.、)]\s/.test(lines[i+1].trim())){continue;}
+      closeL();closeT();continue;
+    }
     let bm=s.match(/^B(\d+)$/);
     if(bm){closeL();closeT();html+='<pre><code>'+esc(blocks[+bm[1]])+'</code></pre>';continue;}
-    if(s.startsWith('S')){closeL();closeT();html+='<div class="sec">'+s.slice(2).replace('','')+'</div>';continue;}
+    if(s.startsWith('S')){closeL();closeT();html+='<div class="sec">'+s.slice(1)+'</div>';continue;}
     let hm=s.match(/^(#{1,4})\s+(.*)$/);
     if(hm){closeL();closeT();html+='<div class="sec">'+hm[2]+'</div>';continue;}
     if(/^([-*_]){3,}$/.test(s)){closeL();closeT();html+='<hr>';continue;}
@@ -354,6 +371,78 @@ function showEscEarly(info){
   }
   escEarlyEl.innerHTML=`<div class="av bot">🩺</div><div class="bubble"><div class="card">${escCard(info)}</div></div>`;
 }
+function fillQuestion(t){qBox.value=t;qBox.focus();}
+function renderClarifyCard(data,save){
+  const cl=data.clarify||{};
+  const qs=(cl.questions||[]).map(q=>`<div class="clarify-q" data-q="${esc(q)}" onclick="fillQuestion(this.getAttribute('data-q'))">${esc(q)}</div>`).join('');
+  const row=document.createElement('div');row.className='row';
+  row.innerHTML=`<div class="av bot">🩺</div><div class="bubble"><div class="card clarify-card">
+    <div class="who"><span>MediTriage</span><span class="vbadge">信息采集</span></div>
+    <div class="body">
+      <div class="clarify-title">🤔 为了更准确地评估，请补充以下信息：</div>
+      <div class="clarify-list">${qs}</div>
+      <div class="esc-hint">点击问题可直接填入输入框；回答后发送即可继续。</div>
+    </div></div></div>`;
+  messages.appendChild(row);scrollToTop(row);
+  if(!restoring&&save)pushAssistant(data);
+}
+function onAnswerChunk(data){
+  /* 思考完成后的流式输出：逐片追加到答案气泡（textContent 防注入），result 到达后换成完整卡片 */
+  if(data.done)return;
+  streamBuf+=(data.chunk||'');
+  if(!streamEl){
+    if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
+    streamEl=document.createElement('div');streamEl.className='row';
+    streamEl.innerHTML=`<div class="av bot">🩺</div><div class="bubble"><div class="card"><div class="body"><div class="ans"><span class="stream-txt"></span><span class="stream-cur">▍</span></div></div></div></div>`;
+    messages.appendChild(streamEl);scrollBottom();
+  }
+  const txt=streamEl.querySelector('.stream-txt');
+  txt.textContent=streamBuf;
+  scrollBottom();
+}
+
+/* ---------- 会话持久化（刷新不丢） ---------- */
+function capImg(img){return img&&img.length>1500000?null:(img||null);}
+function sanitizeData(d){
+  const o=d||{};
+  return {answer:o.answer||'',mode:o.mode,swarm_enabled:!!o.swarm_enabled,
+    agents_involved:o.agents_involved||[],total_time:o.total_time,
+    session_id:o.session_id,disclaimer:o.disclaimer,
+    timeout_occurred:!!o.timeout_occurred,escalation:o.escalation||null,
+  clarify:o.clarify||null};
+}
+function saveChat(){
+  try{
+    const payload={sessionId:sessionId,transcript:transcript};
+    try{localStorage.setItem(LS_KEY,JSON.stringify(payload));return;}
+    catch(e){/* 超限（多为大图）：去掉图片降级再存一次 */}
+    const slim=transcript.map(it=>it.t==='u'?{t:'u',q:it.q,img:null}:it);
+    localStorage.setItem(LS_KEY,JSON.stringify({sessionId:sessionId,transcript:slim}));
+  }catch(e){/* 持久化失败不影响聊天 */}
+}
+function pushUser(q,img){transcript.push({t:'u',q:q||'',img:capImg(img)});saveChat();}
+function pushAssistant(data){transcript.push({t:'a',data:sanitizeData(data)});saveChat();}
+function restoreChat(){
+  let saved=null;
+  try{saved=JSON.parse(localStorage.getItem(LS_KEY)||'null');}catch(e){saved=null;}
+  if(!saved||!Array.isArray(saved.transcript)||!saved.transcript.length)return;
+  if(saved.sessionId)sessionId=saved.sessionId;
+  transcript=saved.transcript.slice();   // 重建内存镜像：恢复后再发消息不会覆盖旧记录
+  restoring=true;
+  try{
+    clearEmpty();
+    saved.transcript.forEach(it=>{
+      if(it.t==='u')appendUser(it.q||'',it.img||null);
+      else if(it.t==='a'&&it.data)renderResult(it.data,false);
+    });
+    setStatus('已恢复历史对话','done');
+  }finally{restoring=false;}
+}
+function newChat(){
+  if(!confirm('确定清空当前会话记录吗？'))return;
+  try{localStorage.removeItem(LS_KEY);}catch(e){}
+  location.reload();
+}
 
 /* ---------- 渲染消息 ---------- */
 function appendUser(q,img){
@@ -364,16 +453,22 @@ function appendUser(q,img){
   if(q) inner+=`<div class="user-text">${esc(q)}</div>`;
   row.innerHTML=`<div class="av me">🧑</div><div class="bubble">${inner}</div>`;
   messages.appendChild(row);scrollBottom();
+  if(!restoring)pushUser(q,img);
 }
 function showThinking(){
   const row=document.createElement('div');row.className='row';
   row.innerHTML=`<div class="av bot">🩺</div><div class="bubble"><div class="card"><div class="thinking"><span class="dots"><i></i><i></i><i></i></span> MediTriage 正在分析…</div></div></div>`;
   messages.appendChild(row);thinkingEl=row;scrollBottom();
 }
-function renderResult(data){
+function renderResult(data,save=true){
   clearEmpty();
   if(escEarlyEl){escEarlyEl.remove();escEarlyEl=null;}
+  if(streamEl){streamEl.remove();streamEl=null;streamBuf='';}
   if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
+  if(data.clarify&&(data.clarify.questions||[]).length){
+    renderClarifyCard(data,save);
+    return;
+  }
   const a=data.answer||'';
   const risk=riskOf(a);
   const isVision=data.mode==='vision';
@@ -403,6 +498,7 @@ function renderResult(data){
     + `</div></div></div>`;
   messages.appendChild(row);
   scrollToTop(row);   // 把新回答顶部滚入视野，避免长回答时开头沉到可视区外
+  if(!restoring&&save)pushAssistant(data);
 }
 
 /* ---------- 时间线 ---------- */
@@ -431,17 +527,18 @@ function addEvent(type,data,ts){
 }
 
 function handle(type,data,ts){
-  if(type==='ack'&&data.session_id)sessionId=data.session_id;
+  if(type==='ack'&&data.session_id){sessionId=data.session_id;saveChat();}
   /* 证据条目按 (agent_id, call_index) 精确配对：swarm 下多个 agent 并发调同名工具时，仅按工具名回填会张冠李戴 */
   if(type==='tool_call_started') evidence.push({tool:data.tool_name,query:(data.arguments&&data.arguments.query)||'',preview:'',key:(data.agent_id||'')+'#'+(data.call_index!=null?data.call_index:evidence.length)});
   if(type==='tool_call_completed'){const k=(data.agent_id||'')+'#'+(data.call_index!=null?data.call_index:'');let hit=false;
     for(let i=evidence.length-1;i>=0;i--){if(evidence[i].key===k&&!evidence[i].preview&&!evidence[i].cites){evidence[i].preview=data.result_preview||'';evidence[i].cites=data.citations||null;evidence[i].nf=!!data.not_found;hit=true;break;}}
     if(!hit){for(let i=evidence.length-1;i>=0;i--){if(evidence[i].tool===data.tool_name&&!evidence[i].preview&&!evidence[i].cites){evidence[i].preview=data.result_preview||'';evidence[i].cites=data.citations||null;evidence[i].nf=!!data.not_found;break;}}}}
   if(type==='escalation_created'){showEscEarly(data);}
+  if(type==='answer_chunk'){onAnswerChunk(data);}
   if(type==='result'){gotResult=true;renderResult(data);}
-  if(type==='error'){gotResult=true;if(thinkingEl){thinkingEl.remove();thinkingEl=null;}renderResult({answer:'处理失败：'+(data.message||'未知错误')+'\n请稍后重试；如症状紧急请直接就医或拨打 120。'});setStatus('错误','error');}
+  if(type==='error'){gotResult=true;if(thinkingEl){thinkingEl.remove();thinkingEl=null;}renderResult({answer:'处理失败：'+(data.message||'未知错误')+'\n请稍后重试；如症状紧急请直接就医或拨打 120。'},false);setStatus('错误','error');}
   if(type==='llm_response'&&data.prompt_tokens){ctxUsed=Math.max(ctxUsed,data.prompt_tokens);renderCtx();}
-  if(type!=='end') addEvent(type,data,ts);
+  if(type!=='end'&&type!=='answer_chunk') addEvent(type,data,ts);
 }
 
 /* ---------- 图片处理：客户端压缩成 data URI ---------- */
@@ -488,7 +585,7 @@ async function ask(){
   if(!q&&!pendingImage)return;
   const imgData=pendingImage,imgName=pendingName;
   sendBtn.disabled=true;appendUser(q,imgData);qBox.value='';qBox.style.height='auto';clearComposerImage();
-  clearTL();evidence=[];ctxUsed=0;gotResult=false;escEarlyEl=null;renderCtx();setStatus('处理中…','busy');showThinking();
+  clearTL();evidence=[];ctxUsed=0;gotResult=false;escEarlyEl=null;streamEl=null;streamBuf='';renderCtx();setStatus('处理中…','busy');showThinking();
   let done=false;
   try{
     const body={question:q||'请分析这张医学影像，指出主要发现与可能的异常。',session_id:sessionId};
@@ -510,8 +607,8 @@ async function ask(){
     if(gotResult){setStatus('完成','done');}
     else{/* 流结束但没收到 result/error：连接中断或后端早退，不能假装完成 */
       if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
-      renderResult({answer:'连接中断或服务未返回结果，请重试。'});setStatus('错误','error');}
-  }catch(e){setStatus('错误: '+e.message,'error');if(thinkingEl){thinkingEl.remove();thinkingEl=null;}renderResult({answer:'请求失败：'+e.message});}
+      renderResult({answer:'连接中断或服务未返回结果，请重试。'},false);setStatus('错误','error');}
+  }catch(e){setStatus('错误: '+e.message,'error');if(thinkingEl){thinkingEl.remove();thinkingEl=null;}renderResult({answer:'请求失败：'+e.message},false);}
   finally{sendBtn.disabled=false;}
 }
 
@@ -537,6 +634,7 @@ function renderCtx(){
     b.style.background='';b.style.borderColor='';
   }
 }
+restoreChat();
 </script>
 </body>
 </html>

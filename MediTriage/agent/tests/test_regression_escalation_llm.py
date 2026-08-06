@@ -65,45 +65,51 @@ def test_high_confidence_not_escalate(make_service):
     assert esc is None
 
 
-def test_llm_exception_fallback_escalate(make_service):
+def test_llm_exception_no_rule_signal_not_escalate(make_service):
+    """评分失败 + 无规则高危信号 -> 不转（不再'宁过不欠'全转人工）。"""
     svc, store = make_service(llm_exc=RuntimeError("api down"))
     esc = _run(svc, question="我最近经常头晕", answer="建议规律作息",
                session_id="llm-exc")
-    assert esc is not None
-    assert any("兜底转人工" in r for r in esc["reasons"])
+    assert esc is None
 
 
-def test_llm_bad_json_fallback_escalate(make_service):
+def test_llm_bad_json_no_rule_signal_not_escalate(make_service):
     svc, store = make_service(llm_text="抱歉，我无法评估。")
     esc = _run(svc, question="我最近经常头晕", answer="建议规律作息",
                session_id="llm-bad")
-    assert esc is not None
-    assert any("兜底转人工" in r for r in esc["reasons"])
+    assert esc is None
 
 
-def test_llm_confidence_out_of_range_treated_bad(make_service):
+def test_llm_confidence_out_of_range_not_escalate(make_service):
+    """非法分（越界）解析失败 -> 无规则高危信号不转。"""
     svc, store = make_service(llm_text='{"confidence": 3.7, "risk_level": "low"}')
     esc = _run(svc, question="我最近经常头晕", answer="建议规律作息",
                session_id="llm-range")
-    assert esc is not None  # 非法分 -> 兜底转人工
+    assert esc is None
 
 
-def test_fallback_rate_limit_per_session(make_service):
-    """LLM 故障兜底限频：同一会话最多建 1 张兜底单。"""
+def test_llm_failure_with_rule_high_signal_escalates(make_service):
+    """评分失败但回答已提示立即就医（规则高危信号）-> 转人工。"""
     svc, store = make_service(llm_exc=RuntimeError("api down"))
-    # 同一会话两条不同提问：第一条兜底建单，第二条被限频跳过
-    esc1 = _run(svc, question="我最近经常头晕", answer="建议规律作息",
-                session_id="llm-rate")
-    esc2 = _run(svc, question="我最近经常背痛", answer="建议热敷观察",
-                session_id="llm-rate")
-    assert esc1 is not None
-    assert esc2 is None
-    assert len(store.list(status=None)) == 1
+    esc = _run(svc, question="我最近经常头晕",
+               answer="情况比较危险，建议立即就医。",
+               session_id="llm-seekcare")
+    assert esc is not None
+    assert esc["risk_level"] == "high"
 
 
-def test_fallback_limit_is_per_session(make_service):
-    """不同会话互不影响限频计数。"""
-    svc, store = make_service(llm_exc=RuntimeError("api down"))
-    e1 = _run(svc, question="我最近经常头晕", answer="建议规律作息", session_id="sA")
-    e2 = _run(svc, question="我最近经常背痛", answer="建议热敷观察", session_id="sB")
-    assert e1 is not None and e2 is not None
+def test_llm_medium_not_escalate(make_service):
+    """评分 medium -> 不转（中危由 AI 答复+就医建议，不强制转人工）。"""
+    svc, store = make_service(llm_text='{"confidence": 0.3, "risk_level": "medium"}')
+    esc = _run(svc, question="我最近经常头晕", answer="建议规律作息",
+               session_id="llm-med")
+    assert esc is None
+
+
+def test_agent_high_escalates(make_service):
+    """Agent 结构化评估 high -> 直接转（不等 LLM 评分）。"""
+    svc, store = make_service(llm_text='{"confidence": 0.9, "risk_level": "low"}')
+    esc = _run(svc, question="我最近经常头晕", answer="风险等级：高危，建议尽快就医",
+               session_id="llm-agh", result={"risk_level": "high"})
+    assert esc is not None
+    assert esc["risk_level"] == "high"

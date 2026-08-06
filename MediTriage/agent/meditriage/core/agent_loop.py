@@ -15,6 +15,7 @@ _shrink_messages_for_overflow），整体行为：
 - 其他异常：迭代有余额则回到 reason 重试，否则标记失败
 - 支持短期记忆集成与约束验证
 """
+import asyncio
 import os
 import uuid
 import json
@@ -106,6 +107,17 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
         self.short_term_memory = short_term_memory
+        # 工具并行开关（env 可关）：同一轮多个 Skill 并行执行 + 保序回灌。
+        # 质量保障：结果按原始调用顺序回灌，模型看到的内容/顺序与串行一致。
+        self._tool_parallel = os.environ.get(
+            "MEDITRIAGE_TOOL_PARALLEL", "1"
+        ).strip().lower() not in ("0", "false", "no", "")
+        try:
+            self._tool_max_concurrent = max(
+                1, int(os.environ.get("MEDITRIAGE_TOOL_MAX_CONCURRENT", "3"))
+            )
+        except (TypeError, ValueError):
+            self._tool_max_concurrent = 3
 
         # 约束验证器和自动修复器
         self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
@@ -489,30 +501,19 @@ class AgentLoop:
                 content=f"调用工具：{', '.join(tool_names)}"
             )
 
-        # 执行每个 Skill 调用
+        # 执行每个 Skill 调用：并行执行 + 保序回灌。
+        # 并发安全已排查：全部 Skill 只读（RAG 检索/规则/常量表），无写共享状态。
+        # 质量保障：asyncio.gather 按输入顺序返回结果 -> 模型看到的工具结果
+        # 内容与顺序和串行完全一致，最终输出质量不变。
         _any_failed = False
-        for tool_call in llm_response.tool_calls:
-            # 增加计数
-            state.tool_call_count += 1
-            logger.debug(
-                f"Executing: "
-                f"{tool_call.name}({tool_call.arguments}) - "
-                f"第 {state.tool_call_count} 次调用"
-            )
+        _parallel = self._tool_parallel and len(llm_response.tool_calls) > 1
 
-            # search_history 的 session_id 服务端注入：真实会话 ID 只有
-            # 运行时知道，靠 LLM 填写必然臆造（查空还误导模型"无历史"）
+        # ---- 1) 预检：search_history 注入 + 去重 + 约束验证（主协程、执行前
+        #          统一检查，消除并发下 called_signatures 竞态）----
+        _prepared: List[tuple] = []
+        for tool_call in llm_response.tool_calls:
             if tool_call.name == "search_history" and session_id:
                 tool_call.arguments["session_id"] = session_id
-
-            emit("tool_call_started", {
-                "tool_name": tool_call.name,
-                "arguments": tool_call.arguments,
-                "call_index": state.tool_call_count,
-                "iteration": state.iteration,
-            })
-
-            # 去重守卫：同一 (工具, 参数) 已执行过则不再重复调用，直接回灌提示
             try:
                 _sig = (
                     f"{tool_call.name}:"
@@ -520,12 +521,78 @@ class AgentLoop:
                 )
             except Exception:
                 _sig = f"{tool_call.name}:{tool_call.arguments}"
-
-            if _sig in state.called_signatures:
+            _skip = _sig in state.called_signatures
+            if not _skip:
+                state.called_signatures.add(_sig)
+                # 验证调用（无副作用，可预检）
+                if self.validator:
+                    validation_result = (
+                        self.validator.validate_tool_call(
+                            agent.agent_id, tool_call.name
+                        )
+                    )
+                    if not validation_result.get("valid"):
+                        logger.warning(
+                            f"约束警告: "
+                            f"{validation_result.get('reason')}"
+                        )
+            else:
                 logger.warning(
                     f"跳过重复调用：{tool_call.name}"
                     f"（相同参数已执行过）"
                 )
+            _prepared.append((tool_call, _skip))
+
+        # ---- 1.5) 先发所有 tool_call_started（执行前，前端可实时看到在调用哪些工具）
+        for tool_call, _skip in _prepared:
+            state.tool_call_count += 1
+            logger.debug(
+                f"Executing: "
+                f"{tool_call.name}({tool_call.arguments}) - "
+                f"第 {state.tool_call_count} 次调用"
+            )
+            emit("tool_call_started", {
+                "tool_name": tool_call.name,
+                "arguments": tool_call.arguments,
+                "call_index": state.tool_call_count,
+                "iteration": state.iteration,
+            })
+
+        # ---- 2) 执行（并行/串行），结果按输入顺序对齐（gather 保序）----
+        _tool_results: Dict[int, Any] = {}
+        _pending = [tc for tc, _skip in _prepared if not _skip]
+        if _parallel:
+            _sem = asyncio.Semaphore(self._tool_max_concurrent)
+
+            async def _execute_one(_tc):
+                async with _sem:
+                    return await agent.execute_tool(
+                        tool_name=_tc.name, arguments=_tc.arguments
+                    )
+
+            _futures = [
+                asyncio.ensure_future(_execute_one(tc)) for tc in _pending
+            ]
+            for _tc, _fut in zip(_pending, _futures):
+                try:
+                    _tool_results[id(_tc)] = await _fut
+                except Exception as e:
+                    # 失败隔离：单个工具异常不拖垮其他并行工具
+                    logger.error(f"tool {_tc.name} parallel exec error: {e}")
+                    _tool_results[id(_tc)] = {
+                        "success": False,
+                        "answer": f"工具执行异常：{e}",
+                    }
+        else:
+            for _tc in _pending:
+                _tool_results[id(_tc)] = await agent.execute_tool(
+                    tool_name=_tc.name, arguments=_tc.arguments
+                )
+
+        # ---- 3) 保序回灌：按原始调用顺序 emit completed / 回灌 messages /
+        #          落短期记忆，与串行时模型看到的上下文完全一致 ----
+        for tool_call, _skip in _prepared:
+            if _skip:
                 tool_result = {
                     "answer": (
                         "（已对相同请求检索过，不再重复执行。"
@@ -535,31 +602,11 @@ class AgentLoop:
                     "duplicate_skipped": True,
                 }
             else:
-                state.called_signatures.add(_sig)
-
-                # 验证调用
-                if self.validator:
-                    validation_result = (
-                        self.validator.validate_tool_call(
-                            agent.agent_id,
-                            tool_call.name
-                        )
-                    )
-                    if not validation_result.get("valid"):
-                        logger.warning(
-                            f"约束警告: "
-                            f"{validation_result.get('reason')}"
-                        )
-
-                tool_result = await agent.execute_tool(
-                    tool_name=tool_call.name,
-                    arguments=tool_call.arguments
-                )
-
-            if (isinstance(tool_result, dict)
-                    and tool_result.get("success") is False):
-                _any_failed = True
-                state.tool_failure_count += 1
+                tool_result = _tool_results[id(tool_call)]
+                if (isinstance(tool_result, dict)
+                        and tool_result.get("success") is False):
+                    _any_failed = True
+                    state.tool_failure_count += 1
 
             # 预览给前端看：优先用 skill 格式化好的 answer 文本，而非 dict repr
             if isinstance(tool_result, dict):

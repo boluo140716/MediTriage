@@ -138,3 +138,68 @@ def test_no_rule_signal_not_escalate_in_pure_rule(service):
         session_id="sc2",
     )
     assert esc is None
+
+
+class _BoomLLM:
+    """被调用即抛异常：验证低危短路路径完全不碰 LLM。"""
+
+    async def chat(self, *args, **kwargs):
+        raise RuntimeError("低危短路不应调用 LLM")
+
+
+def test_low_risk_short_circuit_skips_llm(tmp_path):
+    """规则无风险 + Agent 结构化评估 low -> 短路不调 LLM、不建单。"""
+    store = EscalationStore(db_path=str(tmp_path / "esc-low.db"))
+    svc = EscalationService(
+        store=store, llm_client=_BoomLLM(), use_llm=True, threshold=0.4,
+    )
+    try:
+        # 低危 + agent 结构化 low -> 短路：不建单、不调 LLM（BoomLLM 不炸）
+        esc = _run(
+            svc, question="我这两天腰疼，中度疼",
+            answer="【风险评估】\n风险等级：低危，建议观察。",
+            session_id="low1", result={"risk_level": "low"},
+        )
+        assert esc is None
+        # 对照：medium + 评分失败（无规则高危信号）-> 不转（仅高危才转）
+        esc2 = _run(
+            svc, question="我这两天腰疼，中度疼",
+            answer="【风险评估】\n风险等级：中危，建议就医。",
+            session_id="low2", result={"risk_level": "medium"},
+        )
+        assert esc2 is None
+    finally:
+        store.close()
+
+
+# ---- 非问诊/泛化应急话术不转 ----
+def test_non_consult_greeting_not_escalate(service):
+    """"你是谁"等非问诊寒暄：AI 答案里的应急话术是泛化提示，不转人工。"""
+    esc = _run(
+        service, question="你是谁",
+        answer="我是 MediTriage 医疗健康助手。如遇胸痛请立即拨打急救电话或前往急诊。",
+        session_id="nc-greet",
+    )
+    assert esc is None
+
+
+def test_info_query_with_emergency_talk_not_escalate(service):
+    """科普咨询即使答案含泛化就医提示也不转。"""
+    esc = _run(
+        service, question="高血压饮食注意什么？",
+        answer="低盐低脂饮食。如遇紧急情况请立即就医。",
+        session_id="nc-info",
+    )
+    assert esc is None
+
+
+def test_seek_care_regex_no_broad_false_hits():
+    """"急救/紧急情况"等宽泛词不再单独触发 seek_care 信号（"急救电话/急救
+    中心/如遇紧急情况"都是 AI 泛化话术）；明确就医动作词仍保留。"""
+    from meditriage.workflows.escalation import _SEEK_CARE_PAT
+    assert _SEEK_CARE_PAT.search("请立即拨打急救电话或前往急诊") is None
+    assert _SEEK_CARE_PAT.search("急救中心电话是多少") is None
+    assert _SEEK_CARE_PAT.search("如遇紧急情况请保持冷静，注意休息") is None
+    # 明确就医动作（针对当前患者的建议）仍命中
+    assert _SEEK_CARE_PAT.search("建议您立即就医") is not None
+    assert _SEEK_CARE_PAT.search("请尽快去医院") is not None
