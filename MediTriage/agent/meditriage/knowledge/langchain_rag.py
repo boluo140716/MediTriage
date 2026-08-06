@@ -329,12 +329,6 @@ class LangChainRAG:
         self._reranker = None
         self._reranker_lock = threading.Lock()
         self._reranker_path = reranker_model
-        # RAG 结果 LRU 缓存：同会话内相同 (query, top_k, filter, rewrite) 命中时
-        # 跳过整个检索链（rewrite/embed/BM25/rerank 全为在线 API，5-10s/次）。
-        # demo 场景可接受知识库更新后缓存短暂过期；线程安全（多 agent 并发检索）。
-        self._search_cache: "OrderedDict[tuple, list]" = OrderedDict()
-        self._search_cache_size = 256
-        self._search_cache_lock = threading.Lock()
         # hybrid(BM25) 状态：id↔content 映射 + BM25Okapi 索引（与 dense 路按 Milvus id 对齐）
         self._bm25 = None
         self._bm25_ids: List[int] = []
@@ -779,29 +773,6 @@ class LangChainRAG:
         # 用原 query rerank（意图锚定）
         return self._rerank_and_format(query, candidates, top_k)
 
-    def _cache_key(self, query: str, top_k: int,
-                   filter_type: Optional[str],
-                   rewrite: Optional[bool]) -> tuple:
-        return (
-            (query or "").strip(), top_k, filter_type or "",
-            "default" if rewrite is None else ("rw" if rewrite else "no-rw"),
-        )
-
-    def _cache_get(self, key: tuple) -> Optional[List[Dict[str, Any]]]:
-        with self._search_cache_lock:
-            hit = self._search_cache.get(key)
-            if hit is None:
-                return None
-            self._search_cache.move_to_end(key)
-            return [dict(x) for x in hit]  # 浅拷贝，防调用方污染缓存
-
-    def _cache_put(self, key: tuple, val: List[Dict[str, Any]]) -> None:
-        with self._search_cache_lock:
-            self._search_cache[key] = val
-            self._search_cache.move_to_end(key)
-            while len(self._search_cache) > self._search_cache_size:
-                self._search_cache.popitem(last=False)
-
     def search(
         self,
         query: str,
@@ -813,25 +784,7 @@ class LangChainRAG:
 
         rewrite: None=按实例默认(self.use_query_rewrite)；True/False 显式覆盖本次。
         启用时先走改写多查询(_search_multi)，任何异常都安全兜底回下方原单 query 路径。
-        带 LRU 缓存：相同检索参数命中时直接返回（省在线 embed/rerank）。
         """
-        key = self._cache_key(query, top_k, filter_type, rewrite)
-        hit = self._cache_get(key)
-        if hit is not None:
-            logger.debug(f"RAG cache hit: {str(query)[:30]}... ({len(hit)} 条)")
-            return hit
-        out = self._search_impl(query, top_k, filter_type, rewrite)
-        self._cache_put(key, out)
-        return out
-
-    def _search_impl(
-        self,
-        query: str,
-        top_k: int = 3,
-        filter_type: Optional[str] = None,
-        rewrite: Optional[bool] = None,
-    ) -> List[Dict[str, Any]]:
-        """（search 的内部实现，供缓存包装调用。）"""
         use_rw = self.use_query_rewrite if rewrite is None else rewrite
         if use_rw:
             try:
