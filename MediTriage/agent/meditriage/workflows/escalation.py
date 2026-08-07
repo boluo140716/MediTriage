@@ -62,6 +62,15 @@ _SEEK_CARE_PAT = re.compile(
     r"马上到急诊|拨打\s*120"
 )
 
+# 明确症状/身体部位词：命中说明是"症状咨询"（问诊）而非科普/能力/寒暄。
+# 与澄清层共用（澄清层从这里 import），避免词表漂移。
+_SYMPTOM_PAT = re.compile(
+    r"头痛|头疼|头晕|疼痛|疼|痛|发烧|发热|咳嗽|胸闷|心慌|心悸|恶心|呕吐|"
+    r"腹泻|便秘|失眠|乏力|麻木|皮疹|瘙痒|视力|耳朵|鼻子|喉咙|嗓子|胸|腹|"
+    r"背|腰|腿|脚|手|关节|胃|心率|不适|难受|喘|出血|抽搐|"
+    r"意识|晕倒|冷汗|麻木无力"
+)
+
 # 信息咨询判定：无风险信号且是"怎么/如何/注意事项"类科普咨询 -> 明显低风险，
 # 直接短路不调 LLM（省延迟与成本）；真实症状描述（如"我最近经常头晕"）
 # 不命中，进第 3 层 LLM 打分。
@@ -169,11 +178,11 @@ def _rule_signals(question: str, answer: str,
             reasons=reasons,
         )
 
-    # 4) 回答已提示立即就医：风险信号（计入原因，进模糊层）
+    # 4) 不再把"回答提示立即就医"当作风险信号：AI 回答几乎总带"如遇X请立即
+    # 就医/拨打急救电话"这类泛化建议话术（连"你好"的能力介绍都会举例"胸痛伴
+    # 出汗"），若据此转人工会把所有普通/科普/寒暄咨询都误转。真正的风险判定
+    # 只依赖：问题侧危机词（用户自述）、Agent 结构化评估、运行异常。
     risk_level, confidence = "low", 1.0
-    if _SEEK_CARE_PAT.search(a):
-        reasons.append("回答已提示立即就医")
-        risk_level, confidence = "high", 0.3
 
     # 5) 信息咨询判定：科普咨询（怎么/如何/注意事项）且问题无危机词 -> 不转。
     # 不看答案的就医提示（科普答案常含"如有疑虑请及时就医"等泛化话术，
@@ -303,14 +312,6 @@ class EscalationService:
                     summary=_rule_summary(question, answer, "high"),
                 )
             return None
-        # 规则层高危信号（回答已提示立即就医等）-> 直接转（不依赖评分）
-        if sig.risk_level == "high" and sig.reasons:
-            return EscalationDecision(
-                should_escalate=True, confidence=sig.confidence,
-                risk_level="high",
-                reasons=sig.reasons + ["规则高危信号直接转人工"],
-                summary=_rule_summary(question, answer, "high"),
-            )
         scored = await self._llm_score(question, answer)
         if scored is None:
             # 评分不可用：无规则高危信号 -> 不转（信任规则层 + Agent 评估，
@@ -364,6 +365,15 @@ class EscalationService:
                     reasons=sig.reasons,
                     summary=_rule_summary(question, answer, sig.risk_level),
                 )
+            elif not _CRISIS_PAT.search(question or "") and not _SYMPTOM_PAT.search(
+                question or ""
+            ):
+                # 非问诊短路：问题未描述明确症状（"你好""关于医疗知识你能帮我
+                # 解答吗"）-> 不转人工。答案里的"立即就医/急救"是 AI 泛化
+                # 建议话术，几乎所有回答都有，不应据此把寒暄/科普/能力咨询
+                # 误转人工。
+                logger.debug("非问诊（无明确症状描述）：不转人工")
+                return None
             elif sig.info_query:
                 # 明显低风险的信息咨询：短路，不调 LLM
                 return None

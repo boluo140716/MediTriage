@@ -88,14 +88,13 @@ def test_llm_confidence_out_of_range_not_escalate(make_service):
     assert esc is None
 
 
-def test_llm_failure_with_rule_high_signal_escalates(make_service):
-    """评分失败但回答已提示立即就医（规则高危信号）-> 转人工。"""
+def test_llm_failure_with_seek_care_not_escalate(make_service):
+    """评分失败 + 回答含"立即就医"话术 -> 不转（回答侧就医提示不再触发转诊）。"""
     svc, store = make_service(llm_exc=RuntimeError("api down"))
     esc = _run(svc, question="我最近经常头晕",
                answer="情况比较危险，建议立即就医。",
                session_id="llm-seekcare")
-    assert esc is not None
-    assert esc["risk_level"] == "high"
+    assert esc is None
 
 
 def test_llm_medium_not_escalate(make_service):

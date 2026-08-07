@@ -25,7 +25,7 @@ from risk import _grade_risk, _recommendation  # noqa: E402
     ("咯血不止", "emergency"),
     ("嘴歪了半边身子没力气", "emergency"),  # 卒中体征
     ("胸痛", "high"),  # 高危单症状
-    ("持续呕吐好几天", "high"),
+    ("持续呕吐好几天", "medium"),  # 收紧高危表：持续呕吐降为 medium（普通肠胃炎常见）
     ("蜱虫叮咬后发烧和皮疹", "medium"),  # 发烧→发热+皮疹中危组合
     ("拉肚子好几天", "medium"),  # 病程修饰词
     ("轻微咳嗽流鼻涕", "low"),

@@ -63,6 +63,7 @@
   <div class="spacer"></div>
   <button class="btn ghost" onclick="location='/'" title="返回患者端">← 患者端</button>
   <button class="btn" onclick="load()">🔄 刷新</button>
+  <button class="btn" id="delSel" onclick="delSel()" style="display:none">删除选中</button>
 </header>
 
 <div class="tabs">
@@ -75,7 +76,7 @@
 <main>
   <div class="card">
     <table>
-      <thead><tr><th>单号</th><th>风险</th><th>主诉</th><th>状态</th><th>时间</th></tr></thead>
+      <thead><tr><th style="width:28px"><input type="checkbox" id="selAll" onclick="toggleAll(this)" title="全选"></th><th>单号</th><th>风险</th><th>主诉</th><th>状态</th><th>时间</th><th style="width:44px"></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" style="display:none">暂无转诊单</div>
@@ -112,15 +113,54 @@ async function load(){
       const tr=document.createElement('tr');
       tr.className='click';
       tr.onclick=()=>openDetail(it.id);
-      tr.innerHTML=`<td><b>${esc(it.escalation_id)}</b></td>
+      tr.innerHTML=`<td><input type="checkbox" data-id="${it.id}" onclick="event.stopPropagation();toggleSel(${it.id},this.checked)" title="选择"></td>
+        <td><b>${esc(it.escalation_id)}</b></td>
         <td><span class="pill ${rk[0]}">${rk[1]}</span></td>
         <td>${esc((it.question||'').slice(0,40))}${(it.question||'').length>40?'…':''}</td>
         <td><span class="pill ${st[0]}">${st[1]}</span></td>
-        <td style="color:var(--dim)">${esc((it.created_at||'').slice(5,16))}</td>`;
+        <td style="color:var(--dim)">${esc((it.created_at||'').slice(5,16))}</td>
+        <td><button class="btn ghost" onclick="delOne(${it.id},event)" title="删除">🗑</button></td>`;
       tb.appendChild(tr);
     });
     $('statusbar').textContent=`共 ${data.count} 条（${FILTER_LABEL[filter]||filter}）`;
+    const sa=$('selAll'); if(sa) sa.checked=false;
   }catch(e){$('statusbar').textContent='加载失败：'+e.message;}
+}
+let selected=new Set();
+function updateDelBtn(){
+  const b=$('delSel');
+  b.textContent='删除选中('+selected.size+')';
+  b.style.display=selected.size?'inline-block':'none';
+}
+function toggleSel(id,chk){chk?selected.add(id):selected.delete(id);updateDelBtn();}
+function toggleAll(chk){
+  const boxes=document.querySelectorAll('#rows input[type=checkbox]');
+  boxes.forEach(b=>{b.checked=chk.checked;});
+  const ids=[...boxes].map(b=>Number(b.dataset.id)).filter(n=>!isNaN(n));
+  if(chk.checked){ids.forEach(id=>selected.add(id));}else{ids.forEach(id=>selected.delete(id));}
+  updateDelBtn();
+}
+async function delSel(){
+  if(!selected.size)return;
+  if(!confirm('确定删除选中的 '+selected.size+' 条转诊单？'))return;
+  try{
+    const r=await fetch('/api/escalations/batch-delete',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ids:[...selected].map(String)})});
+    const d=await r.json();
+    selected.clear();
+    const b=$('delSel');b.style.display='none';
+    load();
+    alert('已删除 '+d.deleted+' 条');
+  }catch(e){alert('删除失败：'+e.message);}
+}
+async function delOne(id,ev){
+  ev.stopPropagation();
+  if(!confirm('确定删除该转诊单？'))return;
+  try{
+    await fetch('/api/escalations/'+id,{method:'DELETE'});
+    load();
+  }catch(e){alert('删除失败：'+e.message);}
 }
 async function openDetail(id){
   const d=$('detail');

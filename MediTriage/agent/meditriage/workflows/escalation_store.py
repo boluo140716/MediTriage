@@ -225,6 +225,24 @@ class EscalationStore:
             ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    def delete(self, esc_id_or_int) -> bool:
+        """删除单条转诊单（幂等：不存在返回 False）。
+
+        与 _get 一致：支持 int id 或 "ESC-XXXX" 字符串。"""
+        row = self._get(esc_id_or_int)
+        if row is None:
+            return False
+        self._execute("DELETE FROM escalations WHERE id=?", (row["id"],))
+        return True
+
+    def delete_many(self, ids) -> int:
+        """批量删除转诊单（幂等：不存在的 id 跳过），返回实际删除数。"""
+        n = 0
+        for x in (ids or []):
+            if self.delete(x):
+                n += 1
+        return n
+
     def reply(self, esc_id_or_int, reply_text: str) -> Dict[str, Any]:
         """医生回复：escalated -> doctor_replied。非法流转/空回复抛 ValueError。
 

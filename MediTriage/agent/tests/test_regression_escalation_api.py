@@ -18,6 +18,9 @@ def client(tmp_path, monkeypatch):
     # 先注入环境再首次调用单例，保证服务用 tmp DB + 纯规则模式
     monkeypatch.setenv("MEDITRIAGE_ESCALATION_DB", str(tmp_path / "esc.db"))
     monkeypatch.setenv("MEDITRIAGE_ESCALATION_LLM", "0")
+    # 重置转诊服务进程单例：避免前面测试污染（API 端点用单例，需与本 fixture 同 DB）
+    import meditriage.workflows.escalation as _esc_mod
+    monkeypatch.setattr(_esc_mod, "_service", None)
     web_dir = Path(__file__).resolve().parents[1] / "web"
     if str(web_dir) not in sys.path:
         sys.path.insert(0, str(web_dir))
@@ -152,3 +155,32 @@ def test_ask_result_carries_escalation(client):
     # on_created 回调先于 result 触发（患者端 SSE 通知）
     assert len(created) == 1
     assert created[0]["escalation_id"] == payload["escalation"]["escalation_id"]
+
+
+def test_delete_single_and_batch(client):
+    """医生端删除转诊单：单删 + 批量删除 + 幂等。"""
+    c, svc = client
+    # 建两张单
+    e1 = svc.store.create(
+        session_id="del-1", question="测试删除1",
+        summary={"风险等级": "low"}, risk_level="low",
+        confidence=1.0, reasons=[],
+    )
+    e2 = svc.store.create(
+        session_id="del-2", question="测试删除2",
+        summary={"风险等级": "high"}, risk_level="high",
+        confidence=0.3, reasons=["危机"],
+    )
+    # 单删
+    r1 = c.delete("/api/escalations/" + e1["escalation_id"])
+    assert r1.status_code == 200 and r1.json()["ok"] is True
+    # 幂等：再删不存在 -> 404
+    assert c.delete("/api/escalations/" + e1["escalation_id"]).status_code == 404
+    # 批量删（含一个不存在 id）
+    r2 = c.post("/api/escalations/batch-delete", json={
+        "ids": [e2["escalation_id"], "ESC-NOTEXIST"]})
+    assert r2.status_code == 200
+    assert r2.json()["deleted"] == 1
+    # 列表已清空
+    lst = svc.store.list(status=None)
+    assert len(lst) == 0

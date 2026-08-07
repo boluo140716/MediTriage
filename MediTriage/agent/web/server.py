@@ -6,11 +6,12 @@
 """
 import asyncio
 import json
+import os
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -38,6 +39,27 @@ app = FastAPI(
     title="MediTriage Agent Swarm",
     description="医疗 Agent 群体智能 + SSE 可视化",
 )
+
+
+@app.on_event("startup")
+async def _prewarm():
+    """服务启动预热：预初始化 RAG/记忆/Agent，避免首次请求付冷启动代价
+    （RAG 连接 + BM25 索引 + Skill 注册约 30s，首次请求会等很久）。
+    阻塞启动完成（uvicorn 就绪 = 预热完毕），之后任何请求都秒级响应。
+    测试环境（TestClient）设 MEDITRIAGE_PREWARM=0 跳过，避免每个测试都预热。"""
+    if os.environ.get("MEDITRIAGE_PREWARM", "1") != "1":
+        return
+    try:
+        import asyncio
+        from meditriage.swarm.langgraph_swarm import _get_swarm
+        from meditriage.agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
+        await asyncio.to_thread(_get_swarm)
+        await asyncio.to_thread(ConsultationAgent)
+        await asyncio.to_thread(DiagnosticAgent)
+        await asyncio.to_thread(ResearchAgent)
+        logger.info("启动预热完成：RAG/记忆/Agent 已就绪")
+    except Exception as e:
+        logger.warning(f"启动预热失败（不影响服务）: {e}")
 
 # 静态前端
 STATIC_INDEX = Path(__file__).parent / "index.html"
@@ -369,6 +391,31 @@ async def list_escalations(status: Optional[str] = None):
         get_escalation_service().store.list, store_status
     )
     return {"items": items, "count": len(items), "status": status}
+
+
+@app.delete("/api/escalations/{esc_id}")
+async def delete_escalation(esc_id: str):
+    """删除单条转诊单（医生端管理）。幂等：不存在返回 ok=False。"""
+    from meditriage.workflows import get_escalation_service
+    svc = get_escalation_service()
+    ok = svc.store.delete(esc_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="转诊单不存在")
+    return {"ok": True, "deleted": esc_id}
+
+
+class BatchDeleteRequest(BaseModel):
+    # 兼容前端传数字 id 或字符串 esc_id（delete_many 内部已兼容两者）
+    ids: List[Union[int, str]] = Field(..., min_length=1)
+
+
+@app.post("/api/escalations/batch-delete")
+async def batch_delete_escalations(body: BatchDeleteRequest):
+    """批量删除转诊单（医生端勾选删除）。幂等：不存在的 id 跳过。"""
+    from meditriage.workflows import get_escalation_service
+    svc = get_escalation_service()
+    deleted = svc.store.delete_many(body.ids)
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/escalations/{esc_id}")

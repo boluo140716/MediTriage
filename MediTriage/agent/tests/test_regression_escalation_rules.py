@@ -115,18 +115,16 @@ def test_disabled_returns_none(tmp_path):
         store.close()
 
 
-def test_seek_care_signal_escalates_in_pure_rule(service):
-    """纯规则模式：回答已提示立即就医 -> 高危信号直接转人工。"""
+def test_seek_care_no_longer_escalates(service):
+    """回答里的"立即就医"是 AI 泛化话术（几乎所有回答都有），不再触发转诊；
+    真风险由问题侧危机词 / Agent 结构化评估判定。"""
     esc = _run(
         service,
         question="我这两天偶尔心慌，要紧吗？",
         answer="建议立即就医，排查心脏问题。",
         session_id="sc1",
     )
-    assert esc is not None
-    assert esc["risk_level"] == "high"
-    assert any("立即就医" in r for r in esc["reasons"])
-    assert any("纯规则模式" in r for r in esc["reasons"])
+    assert esc is None
 
 
 def test_no_rule_signal_not_escalate_in_pure_rule(service):
@@ -203,3 +201,35 @@ def test_seek_care_regex_no_broad_false_hits():
     # 明确就医动作（针对当前患者的建议）仍命中
     assert _SEEK_CARE_PAT.search("建议您立即就医") is not None
     assert _SEEK_CARE_PAT.search("请尽快去医院") is not None
+
+
+# ---- 非问诊（寒暄/能力咨询）不转人工 ----
+def test_greeting_not_escalate(service):
+    """"你好"：AI 回答含就医话术也不转（泛化建议，非问诊）。"""
+    esc = _run(
+        service, question="你好",
+        answer="你好！我是 MediTriage。如遇紧急情况请立即就医。",
+        session_id="nc-greet2",
+    )
+    assert esc is None
+
+
+def test_ability_query_not_escalate(service):
+    """"关于医疗知识你能帮我解答吗"：能力咨询不转人工。"""
+    esc = _run(
+        service, question="关于医疗方面的知识你都可以帮我解答吗",
+        answer="可以，我能提供健康科普和建议。如有疑虑请立即就医。",
+        session_id="nc-ability",
+    )
+    assert esc is None
+
+
+def test_real_symptom_not_blocked_by_short_circuit(service):
+    """"我最近头晕"（真问诊）不受非问诊短路影响：agent 评估低危 -> 不转，
+    但 crisis force 仍优先。"""
+    # 低危问诊不转
+    esc = _run(
+        service, question="我最近头晕", answer="风险等级：低危，建议休息。",
+        session_id="nc-sym-low", result={"risk_level": "low"},
+    )
+    assert esc is None

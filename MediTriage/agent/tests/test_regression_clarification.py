@@ -362,3 +362,20 @@ def test_gate_returns_none_on_info_query(monkeypatch):
     swarm = _make_swarm(monkeypatch)
     clarify = asyncio.run(swarm.clarify_if_needed("高血压饮食注意什么？", "g4"))
     assert clarify is None                 # 科普 -> 直接完整流程回答
+
+
+# ---- 非问诊不被误追问 ----
+def test_ability_query_not_clarified():
+    """"你能帮我解答医疗知识吗"（带"我"但非问诊）-> 不追问。"""
+    assert rule_precheck("关于医疗方面的知识你都可以帮我解答吗", "") == "info_query"
+
+
+def test_clarify_denial_not_clarified():
+    """"我没说我生病"（澄清话术）-> 不追问。"""
+    assert rule_precheck("我没说我生病", "") == "info_query"
+
+
+def test_real_symptom_still_clarified():
+    """"我最近头晕"（真问诊）-> 仍进追问链路。"""
+    assert rule_precheck("我最近头晕", "") == "unclear"
+    assert rule_precheck("我这两天腰疼", "") == "unclear"

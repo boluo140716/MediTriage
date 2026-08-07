@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-# 复用转诊判定同一套危机规则，避免正则漂移
-from meditriage.workflows.escalation import _CRISIS_PAT
+# 复用转诊判定同一套危机/症状规则，避免正则漂移
+from meditriage.workflows.escalation import _CRISIS_PAT, _SYMPTOM_PAT
 
 
 class PrecheckResult(str, Enum):
@@ -48,14 +48,8 @@ CLARIFY_LLM_TIMEOUT = 8.0
 _CLARIFY_MARKER = "[CLARIFY-ROUND]"
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
-# 明确症状/身体部位词（个人主诉线索；命中说明是"症状咨询"而非泛指科普）
-_SYMPTOM_PAT = re.compile(
-    r"头痛|头疼|头晕|疼痛|疼|痛|发烧|发热|咳嗽|胸闷|心慌|心悸|恶心|呕吐|"
-    r"腹泻|便秘|失眠|乏力|麻木|皮疹|瘙痒|视力|耳朵|鼻子|喉咙|嗓子|胸|腹|"
-    r"背|腰|腿|脚|手|关节|胃|心率|不适|难受|喘|出血|抽搐|"
-    r"意识|晕倒|冷汗|麻木无力"
-)
-# 个人主体（我/家人...）——用于区分"个人问诊"与"泛指科普"
+# 个人主体（我/家人...）——用于区分"个人问诊"与"泛指科普"（已弃用，
+# 见 rule_precheck：问诊判据只看是否描述症状词，不带"我"字）
 _PERSONAL_SUBJECT_PAT = re.compile(r"我|我的|家人|孩子|老人|爸爸|妈妈|儿子|女儿|老婆|老公")
 
 # 信息完整性维度：命中 >=2 个维度视为"信息已较完整，无需追问"
@@ -111,8 +105,9 @@ _CLARIFY_SYSTEM_PROMPT = (
 def rule_precheck(question: str, answer: str) -> PrecheckResult:
     """规则预筛。返回 PrecheckResult。
 
-    区分科普与问诊的关键：无个人主体且无明确症状词 -> 泛指科普，直接回答
-    （如"高血压饮食注意什么""糖尿病吃什么水果"）；否则按信息完整性判定。
+    区分科普与问诊的关键：未描述明确症状词 -> 科普/能力/一般咨询，直接回答
+    （如"高血压饮食注意什么""你能帮我吗""我没说我生病"）；否则按信息完整性
+    判定（真正需要追问的是用户描述了自己/家人的症状）。
     危机判定只看问题侧（患者自述）：危机词命中 -> 不追问，交给转诊评估拦截
     （绝不因追问延误危机处理）。注意不能查 AI 答案侧——答案几乎总会科普
     "拨打120"等危险信号提示（_CRISIS_PAT 含 "120"），查答案侧会误伤，
@@ -121,7 +116,10 @@ def rule_precheck(question: str, answer: str) -> PrecheckResult:
     q = question or ""
     if _CRISIS_PAT.search(q):
         return PrecheckResult.CRISIS
-    if not _PERSONAL_SUBJECT_PAT.search(q) and not _SYMPTOM_PAT.search(q):
+    if not _SYMPTOM_PAT.search(q):
+        # 未描述明确症状（疼/头晕/发烧等）-> 科普/能力/一般咨询，直接回答不追问。
+        # 注意不能以"是否含个人主体（我/家人）"来区分：能力咨询（"你能帮我吗"）、
+        # 澄清话术（"我没说我生病"）都带"我"，但并非问诊，不应被追问症状。
         return PrecheckResult.INFO_QUERY
     if sum(1 for pat in _SUFFICIENT_DIMENSIONS if pat.search(q)) >= 2:
         return PrecheckResult.SUFFICIENT
