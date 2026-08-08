@@ -118,7 +118,7 @@ def test_search_knowledge_empty_results_flagged_not_found(monkeypatch, tmp_path)
 # ---------- ③：视觉链路补发 llm_response 用量事件 ----------
 
 class _FakeVisionClient:
-    def __init__(self):
+    def __init__(self, config=None):
         self.last_usage = None
 
     async def chat(self, messages, max_tokens=None):
@@ -130,6 +130,9 @@ class _FakeVisionClient:
 def test_vision_turn_reports_prompt_tokens(monkeypatch):
     from meditriage.core import vision_handler
     monkeypatch.setattr(vision_handler, "LLMClient", _FakeVisionClient)
+    # 本测试用 Fake 视觉客户端验证 prompt_tokens 上报，与真实视觉 Key 无关；
+    # 显式开启视觉，避免无配置时走降级分支导致断言失败（CI 无 Key 也跑）
+    monkeypatch.setattr(vision_handler, "VISION_ENABLED", True)
     events = []
     out = asyncio.run(vision_handler.process_image_query(
         "data:image/png;base64,xxx", "这张影像有什么异常？",
