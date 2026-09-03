@@ -1,6 +1,6 @@
 # MediTriage — 医疗多智能体问答系统
 
-一个端到端的医疗多模态智能体系统：以 **MediX-R1-8B**（Qwen3-VL backbone，视觉+语言）为推理底座，叠加**多 Agent 协作**、**RAG 指南证据增强**、**短期/长期记忆**、**医学影像问答**与 **Web 可视化**。Agent 与推理底座只经 vLLM `:8000`（OpenAI 兼容 HTTP）解耦，换底座重起 vLLM 即可、应用侧零改动。
+一个端到端的医疗多模态智能体系统：以 **MediX-R1-8B**（Qwen3-VL backbone，视觉+语言）为推理底座，叠加**多 Agent 协作**,**RAG 指南证据增强**,**短期/长期记忆**,**医学影像问答**,**自动转人工问诊**与**Web 可视化**。Agent 与推理底座只经 vLLM `:8000`（OpenAI 兼容 HTTP）解耦，换底座重起 vLLM 即可、应用侧零改动。
 
 > 研究/演示用途，**不能替代专业医生诊断**。
 
@@ -23,6 +23,24 @@
                   │ (medical-milvus)│  │ 长期(Milvus)  │  │ MediX-R1-8B 256K│
                   └─────────────────┘  └──────────────┘  └────────────────┘
 ```
+## 系统页面
+<table>
+  <tr>
+    <td align="center"><img src="https://github.com/user-attachments/assets/a4302575-f0f9-4ed4-84ee-9f19e2eeb924" width="130" alt="患者端" /></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/6250efe9-cdd3-4a34-aca6-b08161c6b840" width="130" alt="医生端" /></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/e84bdc0a-c1b4-48ac-a906-b102dc9880d2" width="130" alt="链路推理示例" /></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/ced024a1-4e0e-4e3d-9931-bdc2b9f2789e" width="130" alt="链路推理示例" />
+</td>
+
+  </tr>
+  <tr>
+    <td align="center"><b>患者端</b></td>
+    <td align="center"><b>医生端</b></td>
+    <td align="center"><b>链路推理示例1</b></td>
+    <td align="center"><b>链路推理示例2</b></td>
+  </tr>
+</table>
+
 
 ## 目录结构
 
@@ -77,97 +95,3 @@ python3 MediTriage/diag/stress/ctx_probe.py
 - 上下文窗口 256K（needle-in-haystack 250K 召回验证）
 - 底座可替换：Agent 仅经 vLLM OpenAI 兼容 HTTP 与模型耦合，换底座重起 vLLM 即可，Agent 侧零改动
 
----
-
-## 轻量运行方案
-
-默认全量方案（本地 vLLM + MediX-R1-8B）保持不变。若机器资源有限，
-可用以下两种方式运行——**Agent / RAG / 记忆 / Web 业务代码零改动**，
-因为推理底座与业务完全解耦（仅经 OpenAI 兼容 HTTP 契约，见 `config.py`）。
-
-### 方案 A：云端 API 推理（普通电脑即可）
-
-1. 启动 Milvus 向量库（Docker，纯 CPU 即可）：
-   ```bash
-   bash MediTriage/infra/start_medical_milvus.sh
-   ```
-   本地 Docker 部署时，向量库地址需指向本机：
-   ```bash
-   export MILVUS_URI=http://127.0.0.1:19530
-   ```
-2. 选择推理底座并设置环境变量（完整清单见 `config.py` 顶部注释）：
-
-   **① 文本问诊（DeepSeek）—— 图像问答自动降级为提示信息：**
-   ```bash
-   export MEDITRIAGE_LLM_BASE_URL=https://api.deepseek.com
-   export MEDITRIAGE_LLM_API_KEY=sk-你的key
-   export MEDITRIAGE_LLM_MODEL=deepseek-chat
-   export MEDITRIAGE_LLM_MULTIMODAL=0
-   ```
-
-   **② 保留影像问答（阿里云百炼 Qwen-VL，OpenAI 兼容）：**
-   ```bash
-   export MEDITRIAGE_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-   export MEDITRIAGE_LLM_API_KEY=sk-你的key
-   export MEDITRIAGE_LLM_MODEL=qwen-vl-max
-   export MEDITRIAGE_LLM_MULTIMODAL=1
-   ```
-3. 启动 Web（无需 medix-fix 容器，直接跑）：
-   ```bash
-   cd MediTriage/agent
-   pip install -r requirements.txt
-   pip install -e .
-   python web/server.py        # 浏览器打开 http://127.0.0.1:8080
-   ```
-
-### 方案 B：低显存 GPU（16~24GB 消费级显卡）
-
-新增脚本 `MediTriage/serving/serve_vllm_low_vram.sh`（与全量脚本同一契约）：
-- 默认把上下文窗口从 256K 缩到 32K（显存大头是 KV cache）
-- 可选量化（AWQ/FP8，需先准备对应权重）与 CPU offload
-
-```bash
-# 默认：32K 上下文
-bash MediTriage/serving/serve_vllm_low_vram.sh
-
-# 更小显存：8K 上下文 / 指定 GPU
-GPU=0 MAX_MODEL_LEN=8192 bash MediTriage/serving/serve_vllm_low_vram.sh
-
-# 量化权重 + CPU offload 组合
-MODEL_PATH=models/MediX-R1-8B-AWQ QUANTIZATION=awq bash MediTriage/serving/serve_vllm_low_vram.sh
-CPU_OFFLOAD_GB=8 MAX_MODEL_LEN=16384 bash MediTriage/serving/serve_vllm_low_vram.sh
-```
-
-### 验证（不需要 GPU，也不需要任何服务）
-
-```bash
-cd MediTriage/agent
-python -m pytest tests/test_regression_*.py tests/test_benchmark.py -q
-```
-### 方案 A2：阿里云百炼一站式在线（嵌入 + 重排 + 对话）
-
-不想下载任何本地模型？把嵌入 / 重排也切到百炼在线 API，一个 API Key 全搞定：
-
-```bash
-# 1) 百炼 Key（https://bailian.console.aliyun.com 开通后获取）
-export MEDITRIAGE_DASHSCOPE_API_KEY=sk-你的key
-
-# 2) 嵌入 + 重排走在线 API（本地零模型下载）
-export MEDITRIAGE_EMBED_PROVIDER=dashscope      # text-embedding-v4，默认 1024 维
-export MEDITRIAGE_RERANK_PROVIDER=dashscope     # gte-rerank-v2
-
-# 3) 对话也走百炼（qwen）或继续用 DeepSeek：
-export MEDITRIAGE_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export MEDITRIAGE_LLM_API_KEY=sk-你的key
-export MEDITRIAGE_LLM_MODEL=qwen-plus
-export MEDITRIAGE_LLM_MULTIMODAL=0
-
-# 4) 灌库 + 启动（本地只跑 Milvus + Web）
-cd MediTriage/agent && pip install -r requirements.txt && pip install -e .
-python ../data/rag_corpus/build_rag_index_v2.py    # 向量化知识库
-python web/server.py                                # http://127.0.0.1:8080
-```
-
-> 嵌入/重排接口改动在 `MediTriage/agent/meditriage/knowledge/langchain_rag.py`：
-> 新增 `_ApiEmbeddings`（OpenAI 兼容 /embeddings）与 `_ApiReranker`（gte-rerank-v2 原生接口），
-> 不设置 provider 时仍走本地 sentence-transformers，行为不变。
